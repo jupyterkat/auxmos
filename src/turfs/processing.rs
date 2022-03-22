@@ -12,7 +12,7 @@ use auxcallback::{byond_callback_sender, process_callbacks_for_millis};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use parking_lot::{const_mutex, Condvar, Mutex, Once, RwLock};
+use parking_lot::{Once, RwLock};
 
 use crate::callbacks::process_aux_callbacks;
 
@@ -21,12 +21,9 @@ lazy_static! {
 		flume::bounded(1);
 }
 
-//SSair control condvars
-static CVAR: (Mutex<CvarStatus>, Condvar) = (const_mutex(CvarStatus::Continue), Condvar::new());
-
 static INIT: Once = Once::new();
 
-//to get thread statuses lock-free
+//thread status
 static IS_PROCESSING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Copy, Clone)]
@@ -42,31 +39,12 @@ struct SSairInfo {
 	planet_enabled: bool,
 }
 
-enum CvarStatus {
-	Continue,
-	Paused,
-	Terminate,
-}
-
-fn set_cvar(new_status: CvarStatus) {
-	let (lock, cvar) = &CVAR;
-	let mut status = lock.lock();
-	*status = new_status;
-	cvar.notify_one();
-}
-
 fn with_processing_callback_receiver<T>(f: impl Fn(&flume::Receiver<SSairInfo>) -> T) -> T {
 	f(&SIGNALING_CHANNEL.1)
 }
 
 fn processing_callbacks_sender() -> flume::Sender<SSairInfo> {
 	SIGNALING_CHANNEL.0.clone()
-}
-
-#[init(full)]
-fn _init_process_control() -> Result<(), String> {
-	set_cvar(CvarStatus::Continue);
-	Ok(())
 }
 
 #[hook("/datum/controller/subsystem/air/proc/thread_running")]
@@ -159,36 +137,13 @@ fn _process_turf_notify() {
 	});
 	Ok(Value::null())
 }
-#[hook("/datum/controller/subsystem/air/proc/check_process_threads")]
-fn _check_process_threads() {
-	let mut should_process = true;
-	{
-		let (lock, cvar) = &CVAR;
-		let status = lock.lock();
-		if matches!(*status, CvarStatus::Paused) {
-			cvar.notify_one();
-			should_process = false;
-		}
-	}
-	Ok(Value::from(should_process))
-}
 
 #[init(full)]
 fn _process_turf_start() -> Result<(), String> {
 	INIT.call_once(|| {
-		rayon::spawn(move || 'main: loop {
+		rayon::spawn(move || loop {
 			//this will block until process_turfs is called
 			let info = with_processing_callback_receiver(|receiver| receiver.recv().unwrap());
-			//this will block until ssair is paused
-			let (lock, cvar) = &CVAR;
-			{
-				let mut status = lock.lock();
-				*status = CvarStatus::Paused;
-				cvar.wait(&mut status);
-				if matches!(*status, CvarStatus::Terminate) {
-					continue 'main;
-				}
-			}
 			IS_PROCESSING.store(true, Ordering::SeqCst);
 			let sender = byond_callback_sender();
 			let (low_pressure_turfs, high_pressure_turfs) = {
@@ -341,14 +296,6 @@ fn _process_turf_start() -> Result<(), String> {
 				}));
 			}
 			IS_PROCESSING.store(false, Ordering::SeqCst);
-			{
-				let mut status = lock.lock();
-				if !matches!(*status, CvarStatus::Terminate) {
-					*status = CvarStatus::Continue;
-				} else {
-					continue 'main;
-				}
-			}
 		});
 	});
 	Ok(())
@@ -583,7 +530,7 @@ fn excited_group_processing(
 		if found_turfs.contains(&initial_turf) {
 			continue;
 		}
-		if let Some(initial_mix_ref) = turf_gases().get(&initial_turf) {
+		if let Some(initial_mix_ref) = turf_gases().try_get(&initial_turf).try_unwrap() {
 			let mut border_turfs: VecDeque<(TurfID, TurfMixture)> = VecDeque::with_capacity(40);
 			let mut turfs: Vec<TurfMixture> = Vec::with_capacity(200);
 			let mut min_pressure = initial_mix_ref.return_pressure();
@@ -616,7 +563,7 @@ fn excited_group_processing(
 									continue;
 								}
 								found_turfs.insert(loc);
-								if let Some(border_mix) = turf_gases().get(&loc) {
+								if let Some(border_mix) = turf_gases().try_get(&loc).try_unwrap() {
 									if border_mix.simulation_level & SIMULATION_LEVEL_DISABLED
 										!= SIMULATION_LEVEL_DISABLED
 									{
@@ -821,7 +768,8 @@ fn _process_heat_hook() {
 					if t.thermal_conductivity > 0.0 && t.heat_capacity > 300.0 && adj > 0 {
 						let mut heat_delta = 0.0;
 						let is_temp_delta_with_air = turf_gases()
-							.get(&i)
+							.try_get(&i)
+							.try_unwrap()
 							.filter(|m| m.simulation_level & SIMULATION_LEVEL_ANY > 0)
 							.and_then(|m| {
 								GasArena::with_all_mixtures(|all_mixtures| {
@@ -880,7 +828,8 @@ fn _process_heat_hook() {
 					}
 					let t: &mut ThermalInfo = &mut maybe_t.unwrap();
 					t.temperature = turf_gases()
-						.get(&i)
+						.try_get(&i)
+						.try_unwrap()
 						.filter(|m| {
 							m.simulation_level != SIMULATION_LEVEL_NONE
 								&& m.simulation_level & SIMULATION_LEVEL_DISABLED
@@ -946,5 +895,4 @@ fn _process_heat_hook() {
 fn reset_auxmos_processing() {
 	PROCESSING_HEAT.store(false, Ordering::SeqCst);
 	HEAT_PROCESS_TIME.store(1_000_000, Ordering::SeqCst);
-	set_cvar(CvarStatus::Terminate)
 }
