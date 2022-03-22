@@ -21,7 +21,7 @@ lazy_static! {
 		flume::bounded(1);
 }
 
-//SSair control conditions
+//SSair control condvars
 static CVAR: (Mutex<CvarStatus>, Condvar) = (const_mutex(CvarStatus::Continue), Condvar::new());
 
 static INIT: Once = Once::new();
@@ -67,11 +67,6 @@ fn processing_callbacks_sender() -> flume::Sender<SSairInfo> {
 fn _init_process_control() -> Result<(), String> {
 	set_cvar(CvarStatus::Continue);
 	Ok(())
-}
-
-#[shutdown]
-fn _shutdown_process_control() {
-	set_cvar(CvarStatus::Terminate)
 }
 
 #[hook("/datum/controller/subsystem/air/proc/thread_running")]
@@ -951,4 +946,5 @@ fn _process_heat_hook() {
 fn reset_auxmos_processing() {
 	PROCESSING_HEAT.store(false, Ordering::SeqCst);
 	HEAT_PROCESS_TIME.store(1_000_000, Ordering::SeqCst);
+	set_cvar(CvarStatus::Terminate)
 }
