@@ -321,7 +321,7 @@ fn should_process(m: TurfMixture, all_mixtures: &[RwLock<Mixture>]) -> bool {
 					}
 				}
 				m.planetary_atmos
-					.and_then(|id| planetary_atmos().get(&id))
+					.and_then(|id| planetary_atmos().try_get(&id).try_unwrap())
 					.map_or(false, |planet_atmos_entry| {
 						let planet_atmos = planet_atmos_entry.value();
 						gas.temperature_compare(planet_atmos)
@@ -366,7 +366,10 @@ fn process_cell(
 			None => return None, // this would lead to inconsistencies--no bueno
 		}
 	}
-	if let Some(planet_atmos_entry) = m.planetary_atmos.and_then(|id| planetary_atmos().get(&id)) {
+	if let Some(planet_atmos_entry) = m
+		.planetary_atmos
+		.and_then(|id| planetary_atmos().try_get(&id).try_unwrap())
+	{
 		end_gas.merge(planet_atmos_entry.value());
 		adj_amount += 1;
 	}
@@ -603,7 +606,10 @@ fn remove_trace_planet_gases(
 	planetary_atmos: &'static DashMap<u32, Mixture, FxBuildHasher>,
 	all_mixtures: &[RwLock<Mixture>],
 ) {
-	if let Some(planet_atmos_entry) = m.planetary_atmos.and_then(|id| planetary_atmos.get(&id)) {
+	if let Some(planet_atmos_entry) = m
+		.planetary_atmos
+		.and_then(|id| planetary_atmos.try_get(&id).try_unwrap())
+	{
 		let planet_atmos = planet_atmos_entry.value();
 		if all_mixtures
 			.get(m.mix)
@@ -786,7 +792,7 @@ fn _process_heat_hook() {
 							})
 							.unwrap_or(false);
 						for (_, loc) in adjacent_tile_ids(adj, i, max_x, max_y) {
-							if let Some(other) = turf_temperatures().get(&loc) {
+							if let Some(other) = turf_temperatures().try_get(&loc).try_unwrap() {
 								heat_delta +=
 									t.thermal_conductivity.min(other.thermal_conductivity)
 										* (other.temperature - t.temperature) * (t.heat_capacity
@@ -827,7 +833,7 @@ fn _process_heat_hook() {
 				.par_iter()
 				.with_min_len(100)
 				.for_each(|&(i, new_temp)| {
-					let maybe_t = turf_temperatures().get_mut(&i);
+					let maybe_t = turf_temperatures().try_get_mut(&i).try_unwrap();
 					if maybe_t.is_none() {
 						return;
 					}
