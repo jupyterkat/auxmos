@@ -513,9 +513,15 @@ fn explosively_depressurize(
 	}
 
 	cur_queue_idx = 0;
+	let mut space_turf_len = 0;
+	let mut total_moles = 0.0;
 	while cur_queue_idx < progression_order.len() {
 		let (i, m) = progression_order[cur_queue_idx];
 		cur_queue_idx += 1;
+
+		total_moles += m.total_moles();
+		m.is_immutable().then(|| space_turf_len += 1);
+
 		if cur_queue_idx > equalize_hard_turf_limit {
 			continue;
 		}
@@ -537,6 +543,9 @@ fn explosively_depressurize(
 			}
 		}
 	}
+
+	let _average_moles = total_moles / (progression_order.len() - space_turf_len) as f32;
+
 	let hpd = auxtools::Value::globals()
 		.get(byond_string!("SSair"))?
 		.get_list(byond_string!("high_pressure_delta"))
@@ -604,7 +613,16 @@ fn explosively_depressurize(
 				Value::from((1 << cur_info.curr_transfer_dir) as f32),
 			)?;
 		}
-		m.clear_air();
+		#[cfg(not(feature = "katmos_slow_decompression"))]
+		{
+			m.clear_air();
+		}
+		#[cfg(feature = "katmos_slow_decompression")]
+		{
+			const DECOMP_REMOVE_RATIO: f32 = 4_f32;
+			m.clear_vol((_average_moles / DECOMP_REMOVE_RATIO).abs());
+		}
+
 		byond_turf.call("handle_decompression_floor_rip", &[&Value::from(sum)])?;
 	}
 	Ok(Value::null())
