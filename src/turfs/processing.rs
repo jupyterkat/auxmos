@@ -141,6 +141,7 @@ fn _process_turf_notify() {
 #[init(full)]
 fn _process_turf_start() -> Result<(), String> {
 	INIT.call_once(|| {
+		#[allow(unused)]
 		rayon::spawn(move || loop {
 			//this will block until process_turfs is called
 			let info = with_processing_callback_receiver(|receiver| receiver.recv().unwrap());
@@ -148,8 +149,12 @@ fn _process_turf_start() -> Result<(), String> {
 			let sender = byond_callback_sender();
 			let (low_pressure_turfs, high_pressure_turfs) = {
 				let start_time = Instant::now();
-				let (low_pressure_turfs, high_pressure_turfs) =
-					fdm(info.max_x, info.max_y, info.fdm_max_steps);
+				let (low_pressure_turfs, high_pressure_turfs) = fdm(
+					info.max_x,
+					info.max_y,
+					info.fdm_max_steps,
+					info.equalize_enabled,
+				);
 				let bench = start_time.elapsed().as_millis();
 				let (lpt, hpt) = (low_pressure_turfs.len(), high_pressure_turfs.len());
 				let _ = sender.try_send(Box::new(move || {
@@ -394,7 +399,12 @@ fn process_cell(
 }
 
 // Solving the heat equation using a Finite Difference Method, an iterative stencil loop.
-fn fdm(max_x: i32, max_y: i32, fdm_max_steps: i32) -> (BTreeSet<TurfID>, BTreeSet<TurfID>) {
+fn fdm(
+	max_x: i32,
+	max_y: i32,
+	fdm_max_steps: i32,
+	equalize_enabled: bool,
+) -> (BTreeSet<TurfID>, BTreeSet<TurfID>) {
 	/*
 		This is the replacement system for LINDA. LINDA requires a lot of bookkeeping,
 		which, when coefficient-wise operations are this fast, is all just unnecessary overhead.
@@ -478,8 +488,7 @@ fn fdm(max_x: i32, max_y: i32, fdm_max_steps: i32) -> (BTreeSet<TurfID>, BTreeSe
 				})
 				.partition(|&(_, _, max_diff)| max_diff <= 5.0);
 			//tossing things around is already handled by katmos, so we don't need to do it here.
-			#[cfg(not(feature = "katmos"))]
-			{
+			if !equalize_enabled {
 				let pressure_deltas_chunked = high_pressure.par_chunks(20).collect::<Vec<_>>();
 				pressure_deltas_chunked
 					.par_iter()
