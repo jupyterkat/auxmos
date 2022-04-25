@@ -10,15 +10,17 @@ use std::time::{Duration, Instant};
 
 use auxcallback::{byond_callback_sender, process_callbacks_for_millis};
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use parking_lot::{Once, RwLock};
 
 use crate::callbacks::process_aux_callbacks;
 
 lazy_static! {
-	static ref TURF_CHANNEL: (flume::Sender<SSairInfo>, flume::Receiver<SSairInfo>) =
-		flume::bounded(1);
+	static ref TURF_CHANNEL: (
+		flume::Sender<Box<SSairInfo>>,
+		flume::Receiver<Box<SSairInfo>>
+	) = flume::bounded(1);
 	static ref HEAT_CHANNEL: (flume::Sender<SSheatInfo>, flume::Receiver<SSheatInfo>) =
 		flume::bounded(1);
 }
@@ -50,11 +52,11 @@ struct SSheatInfo {
 	max_y: i32,
 }
 
-fn with_processing_callback_receiver<T>(f: impl Fn(&flume::Receiver<SSairInfo>) -> T) -> T {
+fn with_processing_callback_receiver<T>(f: impl Fn(&flume::Receiver<Box<SSairInfo>>) -> T) -> T {
 	f(&TURF_CHANNEL.1)
 }
 
-fn processing_callbacks_sender() -> flume::Sender<SSairInfo> {
+fn processing_callbacks_sender() -> flume::Sender<Box<SSairInfo>> {
 	TURF_CHANNEL.0.clone()
 }
 
@@ -145,7 +147,7 @@ fn _process_turf_notify() {
 		.unwrap_or(1.0)
 		!= 0.0;
 	process_aux_callbacks(crate::callbacks::TURFS);
-	let _ = sender.try_send(SSairInfo {
+	let _ = sender.try_send(Box::new(SSairInfo {
 		fdm_max_steps,
 		equalize_turf_limit,
 		equalize_hard_turf_limit,
@@ -154,7 +156,7 @@ fn _process_turf_notify() {
 		max_x,
 		max_y,
 		planet_enabled,
-	});
+	}));
 	Ok(Value::null())
 }
 
@@ -166,7 +168,7 @@ fn _process_turf_start() -> Result<(), String> {
 		rayon::spawn(move || loop {
 			//this will block until process_turfs is called
 			let info = with_processing_callback_receiver(|receiver| receiver.recv().unwrap());
-			TASKS_RUNNING.fetch_add(1, Ordering::Release);
+			TASKS_RUNNING.fetch_add(1, Ordering::AcqRel);
 			let sender = byond_callback_sender();
 			let (low_pressure_turfs, high_pressure_turfs) = {
 				let start_time = Instant::now();
@@ -321,7 +323,7 @@ fn _process_turf_start() -> Result<(), String> {
 					Ok(Value::null())
 				}));
 			}
-			TASKS_RUNNING.fetch_sub(1, Ordering::Release);
+			TASKS_RUNNING.fetch_sub(1, Ordering::AcqRel);
 		});
 	});
 	Ok(())
@@ -801,7 +803,7 @@ fn _process_heat_start() -> Result<(), String> {
 		rayon::spawn(move || loop {
 			//this will block until process_turf_heat is called
 			let info = with_heat_processing_callback_receiver(|receiver| receiver.recv().unwrap());
-			TASKS_RUNNING.fetch_add(1, Ordering::Release);
+			TASKS_RUNNING.fetch_add(1, Ordering::AcqRel);
 			let start_time = Instant::now();
 			let sender = byond_callback_sender();
 			let emissivity_constant: f64 = STEFAN_BOLTZMANN_CONSTANT * info.time_delta;
@@ -920,7 +922,7 @@ fn _process_heat_start() -> Result<(), String> {
 			let old_bench = HEAT_PROCESS_TIME.load(Ordering::Acquire);
 			// We display this as part of the MC atmospherics stuff.
 			HEAT_PROCESS_TIME.store((old_bench * 3 + (bench * 7) as u64) / 10, Ordering::Release);
-			TASKS_RUNNING.fetch_sub(1, Ordering::Release);
+			TASKS_RUNNING.fetch_sub(1, Ordering::AcqRel);
 		});
 	});
 	Ok(())
