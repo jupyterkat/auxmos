@@ -19,10 +19,6 @@ use crate::callbacks::process_aux_callbacks;
 lazy_static! {
 	static ref TURF_CHANNEL: (flume::Sender<SSairInfo>, flume::Receiver<SSairInfo>) =
 		flume::bounded(1);
-
-}
-
-lazy_static! {
 	static ref HEAT_CHANNEL: (flume::Sender<SSheatInfo>, flume::Receiver<SSheatInfo>) =
 		flume::bounded(1);
 }
