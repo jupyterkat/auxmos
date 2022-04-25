@@ -876,7 +876,7 @@ pub(crate) fn equalize(
 			if !planet_turfs.is_empty() {
 				turfs_processed.fetch_add(
 					turfs.len() + planet_turfs.len(),
-					std::sync::atomic::Ordering::SeqCst,
+					std::sync::atomic::Ordering::AcqRel,
 				);
 				process_planet_turfs(
 					planet_turfs,
@@ -888,7 +888,7 @@ pub(crate) fn equalize(
 					&info,
 				);
 			} else {
-				turfs_processed.fetch_add(turfs.len(), std::sync::atomic::Ordering::SeqCst);
+				turfs_processed.fetch_add(turfs.len(), std::sync::atomic::Ordering::AcqRel);
 			}
 			(turfs, info)
 		})
@@ -899,5 +899,5 @@ pub(crate) fn equalize(
 			finalize_eq(*i, m, turf, max_x, max_y, &info);
 		});
 	});
-	turfs_processed.load(std::sync::atomic::Ordering::Relaxed)
+	turfs_processed.load(std::sync::atomic::Ordering::Acquire)
 }

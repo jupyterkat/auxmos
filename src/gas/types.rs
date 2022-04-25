@@ -240,7 +240,7 @@ fn _destroy_gas_info_structs() {
 #[hook("/proc/_auxtools_register_gas")]
 fn _hook_register_gas(gas: Value) {
 	let gas_id = gas.get_string(byond_string!("id"))?;
-	let gas_cache = GasType::new(&gas, TOTAL_NUM_GASES.load(Ordering::Relaxed))?;
+	let gas_cache = GasType::new(&gas, TOTAL_NUM_GASES.load(Ordering::Acquire))?;
 	unsafe { GAS_INFO_BY_STRING.as_ref() }
 		.unwrap()
 		.insert(gas_id.into_boxed_str(), gas_cache.clone());
@@ -250,7 +250,7 @@ fn _hook_register_gas(gas: Value) {
 		.unwrap()
 		.push(gas_cache.specific_heat);
 	GAS_INFO_BY_IDX.write().as_mut().unwrap().push(gas_cache);
-	TOTAL_NUM_GASES.fetch_add(1, Ordering::Release); // this is the only thing that stores it other than shutdown
+	TOTAL_NUM_GASES.fetch_add(1, Ordering::AcqRel); // this is the only thing that stores it other than shutdown
 	Ok(Value::null())
 }
 

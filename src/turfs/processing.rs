@@ -10,21 +10,29 @@ use std::time::{Duration, Instant};
 
 use auxcallback::{byond_callback_sender, process_callbacks_for_millis};
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use parking_lot::{Once, RwLock};
 
 use crate::callbacks::process_aux_callbacks;
 
 lazy_static! {
-	static ref SIGNALING_CHANNEL: (flume::Sender<SSairInfo>, flume::Receiver<SSairInfo>) =
+	static ref TURF_CHANNEL: (flume::Sender<SSairInfo>, flume::Receiver<SSairInfo>) =
+		flume::bounded(1);
+
+}
+
+lazy_static! {
+	static ref HEAT_CHANNEL: (flume::Sender<SSheatInfo>, flume::Receiver<SSheatInfo>) =
 		flume::bounded(1);
 }
 
-static INIT: Once = Once::new();
+static INIT_TURF: Once = Once::new();
+
+static INIT_HEAT: Once = Once::new();
 
 //thread status
-static IS_PROCESSING: AtomicBool = AtomicBool::new(false);
+static TASKS_RUNNING: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Copy, Clone)]
 #[allow(unused)]
@@ -39,17 +47,32 @@ struct SSairInfo {
 	planet_enabled: bool,
 }
 
+#[derive(Copy, Clone)]
+struct SSheatInfo {
+	time_delta: f64,
+	max_x: i32,
+	max_y: i32,
+}
+
 fn with_processing_callback_receiver<T>(f: impl Fn(&flume::Receiver<SSairInfo>) -> T) -> T {
-	f(&SIGNALING_CHANNEL.1)
+	f(&TURF_CHANNEL.1)
 }
 
 fn processing_callbacks_sender() -> flume::Sender<SSairInfo> {
-	SIGNALING_CHANNEL.0.clone()
+	TURF_CHANNEL.0.clone()
+}
+
+fn with_heat_processing_callback_receiver<T>(f: impl Fn(&flume::Receiver<SSheatInfo>) -> T) -> T {
+	f(&HEAT_CHANNEL.1)
+}
+
+fn heat_processing_callbacks_sender() -> flume::Sender<SSheatInfo> {
+	HEAT_CHANNEL.0.clone()
 }
 
 #[hook("/datum/controller/subsystem/air/proc/thread_running")]
 fn _thread_running_hook() {
-	Ok(Value::from(IS_PROCESSING.load(Ordering::Relaxed)))
+	Ok(Value::from(TASKS_RUNNING.load(Ordering::Acquire) != 0))
 }
 
 #[hook("/datum/controller/subsystem/air/proc/finish_turf_processing_auxtools")]
@@ -69,7 +92,6 @@ fn _finish_process_turfs() {
 	let processing_callbacks_unfinished = process_callbacks_for_millis(arg_limit as u64);
 	process_aux_callbacks(crate::callbacks::TURFS);
 	if processing_callbacks_unfinished {
-
 		Ok(Value::from(true))
 	} else {
 		Ok(Value::from(false))
@@ -128,26 +150,26 @@ fn _process_turf_notify() {
 		!= 0.0;
 	process_aux_callbacks(crate::callbacks::TURFS);
 	let _ = sender.try_send(SSairInfo {
-		fdm_max_steps: fdm_max_steps,
-		equalize_turf_limit: equalize_turf_limit,
-		equalize_hard_turf_limit: equalize_hard_turf_limit,
-		equalize_enabled: equalize_enabled,
-		group_pressure_goal: group_pressure_goal,
-		max_x: max_x,
-		max_y: max_y,
-		planet_enabled: planet_enabled,
+		fdm_max_steps,
+		equalize_turf_limit,
+		equalize_hard_turf_limit,
+		equalize_enabled,
+		group_pressure_goal,
+		max_x,
+		max_y,
+		planet_enabled,
 	});
 	Ok(Value::null())
 }
 
 #[init(full)]
 fn _process_turf_start() -> Result<(), String> {
-	INIT.call_once(|| {
+	INIT_TURF.call_once(|| {
 		#[allow(unused)]
 		rayon::spawn(move || loop {
 			//this will block until process_turfs is called
 			let info = with_processing_callback_receiver(|receiver| receiver.recv().unwrap());
-			IS_PROCESSING.store(true, Ordering::SeqCst);
+			TASKS_RUNNING.fetch_add(1, Ordering::Release);
 			let sender = byond_callback_sender();
 			let (low_pressure_turfs, high_pressure_turfs) = {
 				let start_time = Instant::now();
@@ -302,7 +324,7 @@ fn _process_turf_start() -> Result<(), String> {
 					Ok(Value::null())
 				}));
 			}
-			IS_PROCESSING.store(false, Ordering::SeqCst);
+			TASKS_RUNNING.fetch_sub(1, Ordering::Release);
 		});
 	});
 	Ok(())
@@ -709,13 +731,11 @@ static HEAT_PROCESS_TIME: AtomicU64 = AtomicU64::new(1_000_000);
 
 #[hook("/datum/controller/subsystem/air/proc/heat_process_time")]
 fn _process_heat_time() {
-	let tot = HEAT_PROCESS_TIME.load(Ordering::SeqCst);
+	let tot = HEAT_PROCESS_TIME.load(Ordering::Acquire);
 	Ok(Value::from(
 		Duration::new(tot / 1_000_000_000, (tot % 1_000_000_000) as u32).as_millis() as f32,
 	))
 }
-
-static PROCESSING_HEAT: AtomicBool = AtomicBool::new(false);
 
 // Expected function call: process_turf_heat()
 // Returns: TRUE if thread not done, FALSE otherwise
@@ -729,53 +749,65 @@ fn _process_heat_hook() {
 		it's done after the previous step. This one doesn't care about
 		consistency like the processing step does--this can run in full parallel.
 	*/
-	if PROCESSING_HEAT.compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
-		== Ok(false)
-	{
-		/*
-			Can't get a number from src in the thread, so we get it here.
-			Have to get the time delta because the radiation
-			is actually physics-based--the stefan boltzmann constant
-			and radiation from space both have dimensions of second^-1 that
-			need to be multiplied out to have any physical meaning.
-			They also have dimensions of meter^-2, but I'm assuming
-			turf tiles are 1 meter^2 anyway--the atmos subsystem
-			does this in general, thus turf gas mixtures being 2.5 m^3.
-		*/
-		let time_delta = (src.get_number(byond_string!("wait")).map_err(|_| {
+	/*
+		Can't get a number from src in the thread, so we get it here.
+		Have to get the time delta because the radiation
+		is actually physics-based--the stefan boltzmann constant
+		and radiation from space both have dimensions of second^-1 that
+		need to be multiplied out to have any physical meaning.
+		They also have dimensions of meter^-2, but I'm assuming
+		turf tiles are 1 meter^2 anyway--the atmos subsystem
+		does this in general, thus turf gas mixtures being 2.5 m^3.
+	*/
+	let sender = heat_processing_callbacks_sender();
+	let time_delta = (src.get_number(byond_string!("wait")).map_err(|_| {
+		runtime!(
+			"Attempt to interpret non-number value as number {} {}:{}",
+			std::file!(),
+			std::line!(),
+			std::column!()
+		)
+	})? / 10.0) as f64;
+	let max_x = auxtools::Value::world()
+		.get_number(byond_string!("maxx"))
+		.map_err(|_| {
 			runtime!(
 				"Attempt to interpret non-number value as number {} {}:{}",
 				std::file!(),
 				std::line!(),
 				std::column!()
 			)
-		})? / 10.0) as f64;
-		let max_x = auxtools::Value::world()
-			.get_number(byond_string!("maxx"))
-			.map_err(|_| {
-				runtime!(
-					"Attempt to interpret non-number value as number {} {}:{}",
-					std::file!(),
-					std::line!(),
-					std::column!()
-				)
-			})? as i32;
-		let max_y = auxtools::Value::world()
-			.get_number(byond_string!("maxy"))
-			.map_err(|_| {
-				runtime!(
-					"Attempt to interpret non-number value as number {} {}:{}",
-					std::file!(),
-					std::line!(),
-					std::column!()
-				)
-			})? as i32;
-		process_aux_callbacks(crate::callbacks::TEMPERATURE);
-		rayon::spawn(move || {
+		})? as i32;
+	let max_y = auxtools::Value::world()
+		.get_number(byond_string!("maxy"))
+		.map_err(|_| {
+			runtime!(
+				"Attempt to interpret non-number value as number {} {}:{}",
+				std::file!(),
+				std::line!(),
+				std::column!()
+			)
+		})? as i32;
+	process_aux_callbacks(crate::callbacks::TEMPERATURE);
+	let _ = sender.try_send(SSheatInfo {
+		time_delta,
+		max_x,
+		max_y,
+	});
+	Ok(Value::null())
+}
+
+#[init(full)]
+fn _process_heat_start() -> Result<(), String> {
+	INIT_HEAT.call_once(|| {
+		rayon::spawn(move || loop {
+			//this will block until process_turf_heat is called
+			let info = with_heat_processing_callback_receiver(|receiver| receiver.recv().unwrap());
+			TASKS_RUNNING.fetch_add(1, Ordering::Release);
 			let start_time = Instant::now();
 			let sender = byond_callback_sender();
-			let emissivity_constant: f64 = STEFAN_BOLTZMANN_CONSTANT * time_delta;
-			let radiation_from_space_tick: f64 = RADIATION_FROM_SPACE * time_delta;
+			let emissivity_constant: f64 = STEFAN_BOLTZMANN_CONSTANT * info.time_delta;
+			let radiation_from_space_tick: f64 = RADIATION_FROM_SPACE * info.time_delta;
 			let temps_to_update = turf_temperatures()
 				.par_iter()
 				.map(|entry| {
@@ -803,7 +835,7 @@ fn _process_heat_hook() {
 									})
 								})
 								.unwrap_or(false);
-							for (_, loc) in adjacent_tile_ids(adj, i, max_x, max_y) {
+							for (_, loc) in adjacent_tile_ids(adj, i, info.max_x, info.max_y) {
 								heat_delta += turf_temperatures().try_get(&loc).try_unwrap().map_or(
 									0.0,
 									|other| {
@@ -885,31 +917,18 @@ fn _process_heat_hook() {
 						}));
 					}
 				});
-			PROCESSING_HEAT.store(false, Ordering::SeqCst);
 			//Alright, now how much time did that take?
 			let bench = start_time.elapsed().as_nanos();
-			let old_bench = HEAT_PROCESS_TIME.load(Ordering::SeqCst);
+			let old_bench = HEAT_PROCESS_TIME.load(Ordering::Acquire);
 			// We display this as part of the MC atmospherics stuff.
-			HEAT_PROCESS_TIME.store((old_bench * 3 + (bench * 7) as u64) / 10, Ordering::SeqCst);
+			HEAT_PROCESS_TIME.store((old_bench * 3 + (bench * 7) as u64) / 10, Ordering::Release);
+			TASKS_RUNNING.fetch_sub(1, Ordering::Release);
 		});
-	}
-	let arg_limit = args
-		.get(0)
-		.ok_or_else(|| runtime!("Wrong number of arguments to heat processing: 0"))?
-		.as_number()
-		.map_err(|_| {
-			runtime!(
-				"Attempt to interpret non-number value as number {} {}:{}",
-				std::file!(),
-				std::line!(),
-				std::column!()
-			)
-		})?;
-	Ok(Value::from(process_callbacks_for_millis(arg_limit as u64)))
+	});
+	Ok(())
 }
 
 #[shutdown]
 fn reset_auxmos_processing() {
-	PROCESSING_HEAT.store(false, Ordering::SeqCst);
-	HEAT_PROCESS_TIME.store(1_000_000, Ordering::SeqCst);
+	HEAT_PROCESS_TIME.store(1_000_000, Ordering::Release);
 }
