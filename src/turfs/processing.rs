@@ -162,6 +162,7 @@ fn _process_turf_notify() {
 	Ok(Value::null())
 }
 
+//Fires the task into the thread pool, once
 #[init(full)]
 fn _process_turf_start() -> Result<(), String> {
 	INIT_TURF.call_once(|| {
@@ -797,6 +798,7 @@ fn _process_heat_hook() {
 	Ok(Value::null())
 }
 
+//Fires the task into the thread pool, once
 #[init(full)]
 fn _process_heat_start() -> Result<(), String> {
 	INIT_HEAT.call_once(|| {
