@@ -31,21 +31,21 @@ auxtools = { git = "https://github.com/willox/auxtools"}
 auxcallback = { git = "https://github.com/Putnam3145/auxcallback" }
 auxcleanup = { git = "https://github.com/Putnam3145/auxcleanup", optional = true}
 itertools = "0.10.3"
-rayon = "1.5.1"
+rayon = "1.5.2"
 float-ord = "0.3.2"
 crossbeam = "0.8.1"
-flume = "0.10.11"
+flume = "0.10.12"
 parking_lot = "0.12.0"
 fxhash = "0.2.1"
 nonmax = "0.5.0"
 ahash = "0.7.6"
-indexmap = { version = "1.8.0", features = ["rayon"] }
+indexmap = { version = "1.8.1", features = ["rayon"] }
 dashmap = { version = "5.2.0", features = ["rayon"] }
 lazy_static = "1.4.0"
 
 [dependencies.tinyvec]
-version = "1.5.1"
-features = ["rustc_1_55", "alloc"]
+version = "1.6.0"
+features = ["rustc_1_57", "alloc"]
 
 [profile.release]
 lto = 'fat'
