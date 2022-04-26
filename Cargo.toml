@@ -48,6 +48,8 @@ version = "1.5.1"
 features = ["rustc_1_55", "alloc"]
 
 [profile.release]
-lto = 'thin'
+lto = 'fat'
 debug = true
 panic = 'abort'
+codegen-units = 1
+opt-level = 3
