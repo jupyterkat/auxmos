@@ -740,7 +740,7 @@ fn _process_heat_time() {
 // Expected function call: process_turf_heat()
 // Returns: TRUE if thread not done, FALSE otherwise
 #[hook("/datum/controller/subsystem/air/proc/process_turf_heat")]
-fn _process_heat_hook() {
+fn _process_heat_notify() {
 	/*
 		Replacing LINDA's superconductivity system is this much more brute-force
 		system--it shares heat between turfs and their neighbors,
@@ -748,8 +748,7 @@ fn _process_heat_hook() {
 		between turfs and their gases. Since the latter requires a write lock,
 		it's done after the previous step. This one doesn't care about
 		consistency like the processing step does--this can run in full parallel.
-	*/
-	/*
+
 		Can't get a number from src in the thread, so we get it here.
 		Have to get the time delta because the radiation
 		is actually physics-based--the stefan boltzmann constant
