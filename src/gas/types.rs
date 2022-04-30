@@ -106,9 +106,6 @@ pub struct GasType {
 	/// The ID on the byond end, as a boxed str. Most convenient way to reference it in code; use the function gas_idx_from_string to get idx from this.
 	/// Byond: `id`, a string.
 	pub id: Box<str>,
-	/// The gas's name. Not used in auxmos as of yet.
-	/// Byond: `name`, a string.
-	pub name: Box<str>,
 	/// Not used in auxmos, there for completeness. Only flag on Citadel is GAS_DANGEROUS.
 	/// Byond: `flags`, a number (bitflags).
 	pub flags: u32,
@@ -141,7 +138,6 @@ impl GasType {
 		Ok(Self {
 			idx,
 			id: gas.get_string(byond_string!("id"))?.into_boxed_str(),
-			name: gas.get_string(byond_string!("name"))?.into_boxed_str(),
 			flags: gas.get_number(byond_string!("flags")).unwrap_or_default() as u32,
 			specific_heat: gas
 				.get_number(byond_string!("specific_heat"))
