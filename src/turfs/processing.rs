@@ -429,15 +429,15 @@ fn fdm(
 	max_y: i32,
 	fdm_max_steps: i32,
 	equalize_enabled: bool,
-) -> (BTreeSet<TurfID>, BTreeSet<TurfID>) {
+) -> (Vec<TurfID>, Vec<TurfID>) {
 	/*
 		This is the replacement system for LINDA. LINDA requires a lot of bookkeeping,
 		which, when coefficient-wise operations are this fast, is all just unnecessary overhead.
 		This is a much simpler FDM system, basically like LINDA but without its most important feature,
 		sleeping turfs, which is why I've renamed it to fdm.
 	*/
-	let mut low_pressure_turfs: BTreeSet<TurfID> = BTreeSet::new();
-	let mut high_pressure_turfs: BTreeSet<TurfID> = BTreeSet::new();
+	let mut low_pressure_turfs: Vec<TurfID> = Vec::new();
+	let mut high_pressure_turfs: Vec<TurfID> = Vec::new();
 	let mut cur_count = 1;
 	loop {
 		if cur_count > fdm_max_steps {
@@ -560,7 +560,7 @@ fn excited_group_processing(
 	max_x: i32,
 	max_y: i32,
 	pressure_goal: f32,
-	low_pressure_turfs: &BTreeSet<TurfID>,
+	low_pressure_turfs: &Vec<TurfID>,
 ) -> usize {
 	let mut found_turfs: BTreeSet<TurfID> = BTreeSet::new();
 	for &initial_turf in low_pressure_turfs {

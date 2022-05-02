@@ -5,7 +5,7 @@ use super::*;
 use std::{
 	cell::Cell,
 	{
-		collections::{BTreeSet, HashMap, HashSet},
+		collections::{HashMap, HashSet},
 		sync::atomic::AtomicUsize,
 	},
 };
@@ -784,7 +784,7 @@ pub(crate) fn equalize(
 	max_x: i32,
 	max_y: i32,
 	equalize_hard_turf_limit: usize,
-	high_pressure_turfs: &BTreeSet<TurfID>,
+	high_pressure_turfs: &Vec<TurfID>,
 ) -> usize {
 	let turfs_processed: AtomicUsize = AtomicUsize::new(0);
 	let mut found_turfs: HashSet<TurfID, FxBuildHasher> =
