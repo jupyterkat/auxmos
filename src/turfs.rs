@@ -209,6 +209,7 @@ fn turf_temperatures() -> &'static DashMap<TurfID, ThermalInfo, FxBuildHasher> {
 
 #[hook("/turf/proc/update_air_ref")]
 fn _hook_register_turf() {
+	let id = unsafe { src.raw.data.id };
 	let simulation_level = args[0].as_number().map_err(|_| {
 		runtime!(
 			"Attempt to interpret non-number value as number {} {}:{}",
@@ -217,13 +218,8 @@ fn _hook_register_turf() {
 			std::column!()
 		)
 	})?;
-	let sender = aux_callbacks_sender(crate::callbacks::TURFS);
 	if simulation_level < 0.0 {
-		let id = unsafe { src.raw.data.id };
-		let _ = sender.send(Box::new(move || {
-			turf_gases().remove(&id);
-			Ok(Value::null())
-		}));
+		turf_gases().remove(&id);
 		Ok(Value::null())
 	} else {
 		let mut to_insert: TurfMixture = TurfMixture::default();
@@ -263,17 +259,13 @@ fn _hook_register_turf() {
 			}
 		}
 		let id = unsafe { src.raw.data.id };
-		let _ = sender.send(Box::new(move || {
-			turf_gases().insert(id, to_insert);
-			Ok(Value::null())
-		}));
+		turf_gases().insert(id, to_insert);
 		Ok(Value::null())
 	}
 }
 
 #[hook("/turf/proc/__auxtools_update_turf_temp_info")]
 fn _hook_turf_update_temp() {
-	let sender = aux_callbacks_sender(crate::callbacks::TEMPERATURE);
 	let id = unsafe { src.raw.data.id };
 	if src
 		.get_number(byond_string!("thermal_conductivity"))
@@ -329,15 +321,9 @@ fn _hook_turf_update_temp() {
 					std::column!()
 				)
 			})?;
-		let _ = sender.send(Box::new(move || {
-			turf_temperatures().insert(id, to_insert);
-			Ok(Value::null())
-		}));
+		turf_temperatures().insert(id, to_insert);
 	} else {
-		let _ = sender.send(Box::new(move || {
-			turf_temperatures().remove(&id);
-			Ok(Value::null())
-		}));
+		turf_temperatures().remove(&id);
 	}
 	Ok(Value::null())
 }
