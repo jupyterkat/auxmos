@@ -676,7 +676,7 @@ fn flood_fill_equalize_turfs(
 						// NOT ONE OF YOU IS GONNA SURVIVE THIS
 						// (I just made explosions less laggy, you're welcome)
 						if !ignore_zone {
-							let _ = sender.send(Box::new(move || {
+							let _ = sender.try_send(Box::new(move || {
 								explosively_depressurize(i, max_x, max_y, equalize_hard_turf_limit)
 							}));
 						}
