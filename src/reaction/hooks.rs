@@ -7,6 +7,7 @@ use crate::gas::{
 
 const SUPER_SATURATION_THRESHOLD: f32 = 96.0;
 
+#[must_use]
 pub fn func_from_id(id: &str) -> Option<ReactFunc> {
 	match id {
 		#[cfg(feature = "plasma_fire_hook")]
@@ -29,13 +30,13 @@ fn plasma_fire(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 	const OXYGEN_BURN_RATE_BASE: f32 = 1.4;
 	const PLASMA_OXYGEN_FULLBURN: f32 = 10.0;
 	const PLASMA_BURN_RATE_DELTA: f32 = 9.0;
-	const FIRE_PLASMA_ENERGY_RELEASED: f32 = 3000000.0;
+	const FIRE_PLASMA_ENERGY_RELEASED: f32 = 3_000_000.0;
 	let o2 = gas_idx_from_string(GAS_O2)?;
 	let plasma = gas_idx_from_string(GAS_PLASMA)?;
 	let co2 = gas_idx_from_string(GAS_CO2)?;
 	let tritium = gas_idx_from_string(GAS_TRITIUM)?;
 	let (oxygen_burn_rate, plasma_burn_rate, initial_oxy, initial_plasma, initial_energy) =
-		with_mix(&byond_air, |air| {
+		with_mix(byond_air, |air| {
 			let temperature_scale = {
 				if air.get_temperature() > PLASMA_UPPER_TEMPERATURE {
 					1.0
@@ -71,7 +72,7 @@ fn plasma_fire(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 		})?;
 	let fire_amount = plasma_burn_rate * (1.0 + oxygen_burn_rate);
 	if fire_amount > 0.0 {
-		let temperature = with_mix_mut(&byond_air, |air| {
+		let temperature = with_mix_mut(byond_air, |air| {
 			air.set_moles(plasma, initial_plasma - plasma_burn_rate);
 			air.set_moles(o2, initial_oxy - (plasma_burn_rate * oxygen_burn_rate));
 			if initial_oxy / initial_plasma > SUPER_SATURATION_THRESHOLD {
@@ -118,7 +119,7 @@ fn tritium_fire(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 	const TRITIUM_BURN_OXY_FACTOR: f32 = 100.0;
 	const TRITIUM_BURN_TRIT_FACTOR: f32 = 10.0;
 	const TRITIUM_MINIMUM_RADIATION_FACTOR: f32 = 0.1;
-	const FIRE_HYDROGEN_ENERGY_RELEASED: f32 = 280000.0;
+	const FIRE_HYDROGEN_ENERGY_RELEASED: f32 = 280_000.0;
 	let o2 = gas_idx_from_string(GAS_O2)?;
 	let tritium = gas_idx_from_string(GAS_TRITIUM)?;
 	let water = gas_idx_from_string(GAS_H2O)?;
@@ -165,11 +166,11 @@ fn tritium_fire(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 		if let Some(radiation_burn) = Proc::find(byond_string!("/proc/radiation_burn")) {
 			radiation_burn.call(&[holder, &Value::from(energy_released)])?;
 		} else {
-			let _ = Proc::find(byond_string!("/proc/stack_trace"))
+			drop(Proc::find(byond_string!("/proc/stack_trace"))
 			.ok_or_else(|| runtime!("Couldn't find stack_trace!"))?
 			.call(&[&Value::from_string(
 				"radiation_burn not found! Auxmos hooked trit fires won't irradiated without it!"
-			)?]);
+			)?]));
 		}
 	}
 	if temperature > FIRE_MINIMUM_TEMPERATURE_TO_EXIST {
@@ -283,7 +284,7 @@ fn fusion(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 			* 10_f32.powf(
 				((thermal_energy + bowdlerized_reaction_energy) / middle_energy)
 					.log(FUSION_ENERGY_TRANSLATION_EXPONENT),
-			)
+			);
 	};
 
 	//The decay of the tritium and the reaction's energy produces waste gases, different ones depending on whether the reaction is endo or exothermic
@@ -365,12 +366,12 @@ fn generic_fire(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 			} else {
 				let oxidation_ratio = oxidation_power / total_fuel;
 				if oxidation_ratio > 1.0 {
-					for (_, amt, power) in oxidizers.iter_mut() {
+					for (_, amt, power) in &mut oxidizers {
 						*amt /= oxidation_ratio;
 						*power /= oxidation_ratio;
 					}
 				} else {
-					for (_, amt, power) in fuels.iter_mut() {
+					for (_, amt, power) in &mut fuels {
 						*amt *= oxidation_ratio;
 						*power *= oxidation_ratio;
 					}
@@ -417,7 +418,7 @@ fn generic_fire(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 				let initial_enthalpy = air.get_temperature()
 					* (air.heat_capacity() + R_IDEAL_GAS_EQUATION * air.total_moles());
 				let mut delta_enthalpy = 0.0;
-				for (&i, &amt) in burn_results.iter() {
+				for (&i, &amt) in &burn_results {
 					air.adjust_moles(i, amt);
 					delta_enthalpy -= amt * gas_info[i as usize].enthalpy;
 				}
@@ -453,11 +454,11 @@ fn generic_fire(byond_air: &Value, holder: &Value) -> DMResult<Value> {
 				if let Some(radiation_burn) = Proc::find(byond_string!("/proc/radiation_burn")) {
 					radiation_burn.call(&[holder, &Value::from(radiation_released)])?;
 				} else {
-					let _ = Proc::find(byond_string!("/proc/stack_trace"))
+					drop(Proc::find(byond_string!("/proc/stack_trace"))
 					.ok_or_else(|| runtime!("Couldn't find stack_trace!"))?
 					.call(&[&Value::from_string(
 						"radiation_burn not found! Auxmos hooked fires won't irradiate without it!"
-					)?]);
+					)?]));
 				}
 			}
 			Ok(Value::from(if fire_amount > 0.0 { 1.0 } else { 0.0 }))
