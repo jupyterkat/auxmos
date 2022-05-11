@@ -174,12 +174,8 @@ fn _process_turf_start() -> Result<(), String> {
 			let sender = byond_callback_sender();
 			let (low_pressure_turfs, high_pressure_turfs) = {
 				let start_time = Instant::now();
-				let (low_pressure_turfs, high_pressure_turfs) = fdm(
-					info.max_x,
-					info.max_y,
-					info.fdm_max_steps,
-					info.equalize_enabled,
-				);
+				let (low_pressure_turfs, high_pressure_turfs) =
+					fdm(info.fdm_max_steps, info.equalize_enabled);
 				let bench = start_time.elapsed().as_millis();
 				let (lpt, hpt) = (low_pressure_turfs.len(), high_pressure_turfs.len());
 				drop(sender.try_send(Box::new(move || {
@@ -208,12 +204,8 @@ fn _process_turf_start() -> Result<(), String> {
 			};
 			{
 				let start_time = Instant::now();
-				let processed_turfs = excited_group_processing(
-					info.max_x,
-					info.max_y,
-					info.group_pressure_goal,
-					&low_pressure_turfs,
-				);
+				let processed_turfs =
+					excited_group_processing(info.group_pressure_goal, &low_pressure_turfs);
 				let bench = start_time.elapsed().as_millis();
 				drop(sender.try_send(Box::new(move || {
 					let ssair = auxtools::Value::globals().get(byond_string!("SSair"))?;
@@ -265,12 +257,7 @@ fn _process_turf_start() -> Result<(), String> {
 					}
 					#[cfg(feature = "katmos")]
 					{
-						super::katmos::equalize(
-							info.max_x,
-							info.max_y,
-							info.equalize_hard_turf_limit,
-							&high_pressure_turfs,
-						)
+						super::katmos::equalize(info.equalize_hard_turf_limit, &high_pressure_turfs)
 					}
 					#[cfg(not(feature = "equalization"))]
 					{
@@ -332,31 +319,33 @@ fn _process_turf_start() -> Result<(), String> {
 }
 
 // Compares with neighbors, returning early if any of them are valid.
-fn should_process(m: TurfMixture, all_mixtures: &[RwLock<Mixture>]) -> bool {
-	m.adjacency > 0
+fn should_process(i: TurfID, m: TurfMixture, all_mixtures: &[RwLock<Mixture>]) -> bool {
+	with_adjacency_read(|graph| graph.edges_directed(i, petgraph::Outgoing).any(|_| true))
 		&& m.enabled()
 		&& all_mixtures
 			.get(m.mix)
 			.and_then(RwLock::try_read)
 			.map_or(false, |gas| {
-				for entry in m.adjacent_mixes(all_mixtures) {
-					if let Some(mix) = entry.try_read() {
-						if gas.temperature_compare(&mix)
-							|| gas.compare_with(&mix, MINIMUM_MOLES_DELTA_TO_MOVE)
-						{
-							return true;
+				with_adjacency_read(|graph| {
+					for entry in m.adjacent_mixes(all_mixtures, i, &graph) {
+						if let Some(mix) = entry.try_read() {
+							if gas.temperature_compare(&mix)
+								|| gas.compare_with(&mix, MINIMUM_MOLES_DELTA_TO_MOVE)
+							{
+								return true;
+							}
+						} else {
+							return false;
 						}
-					} else {
-						return false;
 					}
-				}
-				m.planetary_atmos
-					.and_then(|id| planetary_atmos().try_get(&id).try_unwrap())
-					.map_or(false, |planet_atmos_entry| {
-						let planet_atmos = planet_atmos_entry.value();
-						gas.temperature_compare(planet_atmos)
-							|| gas.compare_with(planet_atmos, MINIMUM_MOLES_DELTA_TO_MOVE)
-					})
+					m.planetary_atmos
+						.and_then(|id| planetary_atmos().try_get(&id).try_unwrap())
+						.map_or(false, |planet_atmos_entry| {
+							let planet_atmos = planet_atmos_entry.value();
+							gas.temperature_compare(planet_atmos)
+								|| gas.compare_with(planet_atmos, MINIMUM_MOLES_DELTA_TO_MOVE)
+						})
+				})
 			})
 }
 
@@ -366,8 +355,6 @@ fn should_process(m: TurfMixture, all_mixtures: &[RwLock<Mixture>]) -> bool {
 fn process_cell(
 	i: TurfID,
 	m: TurfMixture,
-	max_x: i32,
-	max_y: i32,
 	all_mixtures: &[RwLock<Mixture>],
 ) -> Option<(TurfID, TurfMixture, Mixture, [(TurfID, f32); 6], i32)> {
 	let mut adj_amount = 0;
@@ -388,16 +375,24 @@ fn process_cell(
 		due to the pressure gradient.
 		Technically that's ρν², but, like, video games.
 	*/
-	for (j, loc, entry) in m.adjacent_mixes_with_adj_info(all_mixtures, i, max_x, max_y) {
-		match entry.try_read() {
-			Some(mix) => {
-				end_gas.merge(&mix);
-				adj_amount += 1;
-				pressure_diffs[j as usize] = (loc, -mix.return_pressure() * GAS_DIFFUSION_CONSTANT);
+	let result = with_adjacency_read(|graph| {
+		for (j, loc, entry) in m.adjacent_mixes_with_adj_info(all_mixtures, i, &graph) {
+			match entry.try_read() {
+				Some(mix) => {
+					end_gas.merge(&mix);
+					adj_amount += 1;
+					pressure_diffs[j as usize] =
+						(loc, -mix.return_pressure() * GAS_DIFFUSION_CONSTANT);
+				}
+				None => return Err(()), // this would lead to inconsistencies--no bueno
 			}
-			None => return None, // this would lead to inconsistencies--no bueno
 		}
+		Ok(())
+	});
+	if result.is_err() {
+		return None;
 	}
+
 	if let Some(planet_atmos_entry) = m
 		.planetary_atmos
 		.and_then(|id| planetary_atmos().try_get(&id).try_unwrap())
@@ -426,12 +421,7 @@ fn process_cell(
 }
 
 // Solving the heat equation using a Finite Difference Method, an iterative stencil loop.
-fn fdm(
-	max_x: i32,
-	max_y: i32,
-	fdm_max_steps: i32,
-	equalize_enabled: bool,
-) -> (Vec<TurfID>, Vec<TurfID>) {
+fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>) {
 	/*
 		This is the replacement system for LINDA. LINDA requires a lot of bookkeeping,
 		which, when coefficient-wise operations are this fast, is all just unnecessary overhead.
@@ -461,8 +451,8 @@ fn fdm(
 					let (&i, &m) = entry.pair();
 					(i, m)
 				})
-				.filter(|&(_, m)| should_process(m, all_mixtures))
-				.filter_map(|(i, m)| process_cell(i, m, max_x, max_y, all_mixtures))
+				.filter(|&(i, m)| should_process(i, m, all_mixtures))
+				.filter_map(|(i, m)| process_cell(i, m, all_mixtures))
 				.collect::<Vec<_>>();
 			/*
 				For the optimization-heads reading this: this is not an unnecessary collect().
@@ -558,12 +548,7 @@ fn fdm(
 }
 
 // Finds small differences in turf pressures and equalizes them.
-fn excited_group_processing(
-	max_x: i32,
-	max_y: i32,
-	pressure_goal: f32,
-	low_pressure_turfs: &Vec<TurfID>,
-) -> usize {
+fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<TurfID>) -> usize {
 	let mut found_turfs: BTreeSet<TurfID> = BTreeSet::new();
 	for &initial_turf in low_pressure_turfs {
 		if found_turfs.contains(&initial_turf) {
@@ -589,7 +574,6 @@ fn excited_group_processing(
 					break;
 				}
 				if let Some((i, turf)) = border_turfs.pop_front() {
-					let adj_tiles = adjacent_tile_ids(turf.adjacency, i, max_x, max_y);
 					if let Some(lock) = all_mixtures.get(turf.mix) {
 						let mix = lock.read();
 						let pressure = mix.return_pressure();
@@ -603,19 +587,21 @@ fn excited_group_processing(
 						turfs.push(turf);
 						fully_mixed.merge(&mix);
 						fully_mixed.volume += mix.volume;
-						for (_, loc) in adj_tiles {
-							if found_turfs.contains(&loc) {
-								continue;
+						with_adjacency_read(|graph| {
+							for loc in graph.neighbors_directed(i, petgraph::Outgoing) {
+								if found_turfs.contains(&loc) {
+									continue;
+								}
+								found_turfs.insert(loc);
+								if let Some(border_mix) = turf_gases()
+									.try_get(&loc)
+									.try_unwrap()
+									.filter(|b| b.enabled())
+								{
+									border_turfs.push_back((loc, *border_mix));
+								}
 							}
-							found_turfs.insert(loc);
-							if let Some(border_mix) = turf_gases()
-								.try_get(&loc)
-								.try_unwrap()
-								.filter(|b| b.enabled())
-							{
-								border_turfs.push_back((loc, *border_mix));
-							}
-						}
+						});
 					}
 				} else {
 					break;
