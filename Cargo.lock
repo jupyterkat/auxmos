@@ -68,7 +68,6 @@ dependencies = [
  "auxcleanup",
  "auxtools",
  "crossbeam",
- "crossbeam-utils",
  "dashmap",
  "float-ord",
  "flume",
@@ -580,10 +579,10 @@ dependencies = [
 [[package]]
 name = "petgraph"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a13a2fa9d0b63e5f22328828741e523766fff0ee9e779316902290dff3f824f"
+source = "git+https://github.com/jupyterkat/petgraph#ebf5daa589e9e6906a2f74e56553638338e30368"
 dependencies = [
  "fixedbitset",
+ "fxhash",
  "indexmap",
 ]
 

@@ -25,11 +25,12 @@ use rayon;
 
 use rayon::prelude::*;
 
+use std::collections::HashMap;
 use std::mem::drop;
 
 use crate::callbacks::aux_callbacks_sender;
 
-use crossbeam_utils::sync::{ShardedLock, ShardedLockReadGuard, ShardedLockWriteGuard};
+use parking_lot::{RwLock, RwLockReadGuard};
 use petgraph::graphmap::DiGraphMap;
 
 const NORTH: u8 = 1;
@@ -67,7 +68,6 @@ struct TurfMixture {
 	pub mix: usize,
 	pub flags: u8,
 	pub planetary_atmos: Option<u32>,
-	//pub cache_id:  ,
 }
 
 #[allow(dead_code)]
@@ -79,7 +79,7 @@ impl TurfMixture {
 	pub fn adjacent_mixes<'a>(
 		&self,
 		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
-		graph: &'a ShardedLockReadGuard<DiGraphMap<usize, TurfID>>,
+		graph: &'a RwLockReadGuard<DiGraphMap<usize, TurfID>>,
 	) -> impl Iterator<Item = &'a parking_lot::RwLock<Mixture>> {
 		graph
 			.neighbors_directed(self.mix, petgraph::Outgoing)
@@ -88,14 +88,11 @@ impl TurfMixture {
 	pub fn adjacent_mixes_with_adj_info<'a>(
 		&self,
 		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
-		graph: &'a ShardedLockReadGuard<DiGraphMap<usize, TurfID>>,
-	) -> impl Iterator<Item = (usize, TurfID, &'a parking_lot::RwLock<Mixture>)> {
+		graph: &'a RwLockReadGuard<DiGraphMap<usize, TurfID>>,
+	) -> impl Iterator<Item = (TurfID, &'a parking_lot::RwLock<Mixture>)> {
 		graph
 			.edges_directed(self.mix, petgraph::Outgoing)
-			.enumerate()
-			.filter_map(move |(ctr, (_, idx, &turfid))| {
-				all_mixtures.get(idx).map(|mix| (ctr, turfid, mix))
-			})
+			.filter_map(move |(_, idx, &turfid)| all_mixtures.get(idx).map(|mix| (turfid, mix)))
 	}
 	pub fn is_immutable(&self) -> bool {
 		GasArena::with_all_mixtures(|all_mixtures| {
@@ -180,11 +177,112 @@ struct ThermalInfo {
 	pub adjacency: u8,
 	pub adjacent_to_space: bool,
 }
+#[derive(Default)]
+struct TurfGases {
+	adjacencies: RwLock<DiGraphMap<usize, TurfID>>,
+	mixtures: RwLock<HashMap<TurfID, TurfMixture, FxBuildHasher>>,
+}
+
+impl TurfGases {
+	pub fn clear_all(&self) {
+		self.mixtures.write().clear();
+		self.adjacencies.write().clear();
+	}
+
+	pub fn remove_turf(&self, idx: TurfID) {
+		if let Some(tmix) = self.mixtures.write().remove(&idx) {
+			self.adjacencies.write().remove_node(tmix.mix);
+		}
+	}
+
+	pub fn insert_turf(&self, idx: TurfID, tmix: TurfMixture) {
+		self.mixtures.write().insert(idx, tmix);
+	}
+
+	pub fn disable_turf(&self, idx: TurfID) {
+		self.mixtures.write().entry(idx).and_modify(|tmix| {
+			tmix.flags |= SIMULATION_DISABLED;
+		});
+	}
+
+	pub fn enable_turf(&self, idx: TurfID) {
+		self.mixtures.write().entry(idx).and_modify(|tmix| {
+			tmix.flags &= !SIMULATION_DISABLED;
+		});
+	}
+
+	pub fn update_adjacencies(&self, idx: TurfID, adjacent_list: List) -> Result<(), Runtime> {
+		let mixguard = self.mixtures.read();
+		let mut graphguard = self.adjacencies.write();
+		if let Some(mix_info) = mixguard.get(&idx) {
+			use std::collections::HashSet;
+			let mut new_list: HashSet<TurfID, FxBuildHasher> = Default::default();
+			for i in 1..=adjacent_list.len() {
+				let adj_val = adjacent_list.get(i)?;
+				//let adjacent_num = adjacent_list.get(&adj_val)?.as_number()? as u8;
+				//graph.add_edge(id, unsafe { adj_val.raw.data.id }, adjacent_num);
+				new_list.insert(unsafe { adj_val.raw.data.id });
+			}
+			let old_edges = graphguard
+				.edges(mix_info.mix)
+				.map(|(_, t2, id)| (*id, t2))
+				.collect::<HashMap<_, _, FxBuildHasher>>();
+
+			for (adj_id, other) in old_edges.iter() {
+				if !new_list.contains(adj_id) {
+					graphguard.remove_edge(mix_info.mix, *other);
+				}
+			}
+			for idx in new_list {
+				mixguard.get(&idx).and_then(|adj_info| {
+					if !old_edges.contains_key(&idx) {
+						graphguard.add_edge(mix_info.mix, adj_info.mix, idx);
+					}
+					Some(())
+				});
+			}
+		};
+		Ok(())
+	}
+
+	pub fn remove_adjacencies(&self, idx: TurfID) {
+		self.mixtures
+			.read()
+			.get(&idx)
+			.and_then(|thin| Some(self.adjacencies.write().remove_node(thin.mix)));
+	}
+
+	pub fn with_read<T, F>(&self, f: F) -> T
+	where
+		F: FnOnce(
+			RwLockReadGuard<HashMap<TurfID, TurfMixture, FxBuildHasher>>,
+			RwLockReadGuard<DiGraphMap<usize, TurfID>>,
+		) -> T,
+	{
+		f(self.mixtures.read(), self.adjacencies.read())
+	}
+
+	pub fn with_mixtures_read<T, F>(&self, f: F) -> T
+	where
+		F: FnOnce(RwLockReadGuard<HashMap<TurfID, TurfMixture, FxBuildHasher>>) -> T,
+	{
+		f(self.mixtures.read())
+	}
+	/*
+	pub fn get_mixture(&self, idx: TurfID) -> Option<TurfMixture> {
+		self.mixtures.read().get(&idx).cloned()
+	}
+	*/
+}
+
 lazy_static::lazy_static! {
+	/*
 	// Adjacencies infos, nodes are mixids, edges are turfids
-	static ref TURF_ADJACENCIES: ShardedLock<DiGraphMap<usize, TurfID>> = Default::default();
+	static ref TURF_ADJACENCIES: RwLock<DiGraphMap<usize, TurfID>> = Default::default();
 	// All the turfs that have gas mixtures.
-	static ref TURF_GASES: DashMap<TurfID, TurfMixture, FxBuildHasher> = Default::default();
+	static ref TURF_GASES: RwLock<HashMap<TurfID, TurfMixture, FxBuildHasher>> = Default::default();
+	*/
+	static ref TURF_GASES: TurfGases = Default::default();
 	// Turfs with temperatures/heat capacities. This is distinct from the above.
 	static ref TURF_TEMPERATURES: DashMap<TurfID, ThermalInfo, FxBuildHasher> = Default::default();
 	// We store planetary atmos by hash of the initial atmos string here for speed.
@@ -193,30 +291,13 @@ lazy_static::lazy_static! {
 
 #[shutdown]
 fn _shutdown_turfs() {
-	with_adjacency_write(|mut graph| {
-		graph.clear();
-	});
-	TURF_GASES.clear();
+	turf_gases().clear_all();
 	TURF_TEMPERATURES.clear();
 	PLANETARY_ATMOS.clear();
 }
 
-pub fn with_adjacency_read<T, F>(f: F) -> T
-where
-	F: FnOnce(ShardedLockReadGuard<DiGraphMap<usize, TurfID>>) -> T,
-{
-	f(TURF_ADJACENCIES.read().unwrap())
-}
-
-pub fn with_adjacency_write<T, F>(f: F) -> T
-where
-	F: FnOnce(ShardedLockWriteGuard<DiGraphMap<usize, TurfID>>) -> T,
-{
-	f(TURF_ADJACENCIES.write().unwrap())
-}
-
 // this would lead to undefined info if it were possible for something to put a None on it during operation, but nothing's going to do that
-fn turf_gases() -> &'static DashMap<TurfID, TurfMixture, FxBuildHasher> {
+fn turf_gases() -> &'static TurfGases {
 	&TURF_GASES
 }
 
@@ -242,12 +323,7 @@ fn _hook_register_turf() {
 	if simulation_level < 0.0 {
 		let id = unsafe { src.raw.data.id };
 		drop(sender.send(Box::new(move || {
-			with_adjacency_write(|mut graph| {
-				turf_gases()
-					.get(&id)
-					.and_then(|thin| Some(graph.remove_node(thin.mix)));
-			});
-			turf_gases().remove(&id);
+			turf_gases().remove_turf(id);
 			Ok(Value::null())
 		})));
 		Ok(Value::null())
@@ -290,7 +366,7 @@ fn _hook_register_turf() {
 		}
 		let id = unsafe { src.raw.data.id };
 		drop(sender.send(Box::new(move || {
-			turf_gases().insert(id, to_insert);
+			turf_gases().insert_turf(id, to_insert);
 			Ok(Value::null())
 		})));
 		Ok(Value::null())
@@ -367,7 +443,7 @@ fn _hook_turf_update_temp() {
 	}
 	Ok(Value::null())
 }
-
+/* will deadlock, don't recommend using this
 #[hook("/turf/proc/set_sleeping")]
 fn _hook_sleep() {
 	let arg = if let Some(arg_get) = args.get(0) {
@@ -385,16 +461,14 @@ fn _hook_sleep() {
 	};
 	let src_id = unsafe { src.raw.data.id };
 	if arg == 0.0 {
-		turf_gases().entry(src_id).and_modify(|turf| {
-			turf.flags &= !SIMULATION_DISABLED;
-		});
+		turf_gases().enable_turf(src_id);
 	} else {
-		turf_gases().entry(src_id).and_modify(|turf| {
-			turf.flags |= SIMULATION_DISABLED;
-		});
+		turf_gases().disable_turf(src_id);
 	}
 	Ok(Value::from(true))
 }
+*/
+
 #[hook("/turf/proc/__update_auxtools_turf_adjacency_info")]
 fn _hook_infos(arg0: Value, arg1: Value) {
 	let update_now = arg1.as_number().unwrap_or(0.0) != 0.0;
@@ -404,64 +478,15 @@ fn _hook_infos(arg0: Value, arg1: Value) {
 	let boxed_fn: Box<dyn Fn() -> DMResult + Send + Sync> = Box::new(move || {
 		let src_turf = unsafe { Value::turf_by_id_unchecked(id) };
 		if let Ok(adjacent_list) = src_turf.get_list(byond_string!("atmos_adjacent_turfs")) {
-			with_adjacency_write(|mut graph| -> Result<(), Runtime> {
-				//Can't just fucking remove it because mut borrows and borrows don't mix
-				//Why isn't there a function for this
-				if let Some(mix_info) = turf_gases().get(&id) {
-					let old_neighbors = graph
-						.neighbors_directed(mix_info.mix, petgraph::Outgoing)
-						.collect::<Vec<_>>();
-					old_neighbors.into_iter().for_each(|other| {
-						graph.remove_edge(mix_info.mix, other);
-					});
-
-					for i in 1..=adjacent_list.len() {
-						let adj_val = adjacent_list.get(i)?;
-						//let adjacent_num = adjacent_list.get(&adj_val)?.as_number()? as u8;
-						//graph.add_edge(id, unsafe { adj_val.raw.data.id }, adjacent_num);
-						turf_gases()
-							.get(&unsafe { adj_val.raw.data.id })
-							.and_then(|adj_info| {
-								graph.add_edge(mix_info.mix, adj_info.mix, unsafe {
-									adj_val.raw.data.id
-								});
-								Some(())
-							});
-					}
-				};
-				/*
-				let old_neighbors = graph
-					.neighbors_directed(id, petgraph::Outgoing)
-					.collect::<Vec<_>>();
-				old_neighbors.into_iter().for_each(|other| {
-					graph.remove_edge(id, other);
-				});
-
-				for i in 1..=adjacent_list.len() {
-					let adj_val = adjacent_list.get(i)?;
-					let adjacent_num = adjacent_list.get(&adj_val)?.as_number()? as u8;
-					graph.add_edge(id, unsafe { adj_val.raw.data.id }, adjacent_num);
-
-				}
-				*/
-				Ok(())
-			})?;
+			turf_gases().update_adjacencies(id, adjacent_list)?;
 		} else {
-			with_adjacency_write(|mut graph| {
-				turf_gases()
-					.get(&id)
-					.and_then(|thin| Some(graph.remove_node(thin.mix)));
-			});
+			turf_gases().remove_adjacencies(id);
 		}
 		if let Ok(blocks_air) = src_turf.get_number(byond_string!("blocks_air")) {
 			if blocks_air == 0.0 {
-				turf_gases().entry(id).and_modify(|turf| {
-					turf.flags &= !SIMULATION_DISABLED;
-				});
+				turf_gases().enable_turf(id)
 			} else {
-				turf_gases().entry(id).and_modify(|turf| {
-					turf.flags |= SIMULATION_DISABLED;
-				});
+				turf_gases().disable_turf(id)
 			}
 		}
 		if let Ok(atmos_blocked_directions) =
