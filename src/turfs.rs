@@ -39,6 +39,7 @@ const WEST: u8 = 8;
 const UP: u8 = 16;
 const DOWN: u8 = 32;
 
+#[allow(unused)]
 const fn adj_flag_to_idx(adj_flag: u8) -> usize {
 	match adj_flag {
 		NORTH => 0,
@@ -66,6 +67,7 @@ struct TurfMixture {
 	pub mix: usize,
 	pub flags: u8,
 	pub planetary_atmos: Option<u32>,
+	//pub cache_id:  ,
 }
 
 #[allow(dead_code)]
@@ -75,41 +77,25 @@ impl TurfMixture {
 		simul_flags & SIMULATION_DISABLED == 0 && simul_flags & SIMULATION_ANY != 0
 	}
 	pub fn adjacent_mixes<'a>(
-		&'a self,
+		&self,
 		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
-		this_idx: TurfID,
-		graph: &'a ShardedLockReadGuard<DiGraphMap<TurfID, u8>>,
+		graph: &'a ShardedLockReadGuard<DiGraphMap<usize, TurfID>>,
 	) -> impl Iterator<Item = &'a parking_lot::RwLock<Mixture>> {
 		graph
-			.neighbors_directed(this_idx, petgraph::Outgoing)
-			.filter_map(move |idx| {
-				let mixnum = turf_gases().get(&idx)?.mix;
-				all_mixtures.get(mixnum)
-			})
+			.neighbors_directed(self.mix, petgraph::Outgoing)
+			.filter_map(move |idx| all_mixtures.get(idx))
 	}
 	pub fn adjacent_mixes_with_adj_info<'a>(
-		&'a self,
+		&self,
 		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
-		this_idx: TurfID,
-		graph: &'a ShardedLockReadGuard<DiGraphMap<TurfID, u8>>,
+		graph: &'a ShardedLockReadGuard<DiGraphMap<usize, TurfID>>,
 	) -> impl Iterator<Item = (usize, TurfID, &'a parking_lot::RwLock<Mixture>)> {
 		graph
-			.neighbors_directed(this_idx, petgraph::Outgoing)
+			.edges_directed(self.mix, petgraph::Outgoing)
 			.enumerate()
-			.filter_map(move |(ctr, idx)| {
-				let mixnum = turf_gases().get(&idx)?.mix;
-				all_mixtures.get(mixnum).map(|mix| (ctr, idx, mix))
+			.filter_map(move |(ctr, (_, idx, &turfid))| {
+				all_mixtures.get(idx).map(|mix| (ctr, turfid, mix))
 			})
-
-		/*
-		self.adjacents
-			.iter()
-			.enumerate()
-			.filter_map(move |(i, idx)| {
-				idx.and_then(|id| all_mixtures.get(id.get()))
-					.map(|g| (i, adjacent_tile_id(i as u8, this_idx, max_x, max_y), g))
-			})
-		*/
 	}
 	pub fn is_immutable(&self) -> bool {
 		GasArena::with_all_mixtures(|all_mixtures| {
@@ -195,19 +181,21 @@ struct ThermalInfo {
 	pub adjacent_to_space: bool,
 }
 lazy_static::lazy_static! {
-	// Adjacencies infos, nodes are TurfIDs, edges are direction flags
-	static ref TURF_ADJACENCIES: ShardedLock<DiGraphMap<TurfID, u8>> = ShardedLock::new(DiGraphMap::new());
+	// Adjacencies infos, nodes are mixids, edges are turfids
+	static ref TURF_ADJACENCIES: ShardedLock<DiGraphMap<usize, TurfID>> = Default::default();
 	// All the turfs that have gas mixtures.
-	static ref TURF_GASES: DashMap<TurfID, TurfMixture, FxBuildHasher> = DashMap::with_hasher(FxBuildHasher::default());
+	static ref TURF_GASES: DashMap<TurfID, TurfMixture, FxBuildHasher> = Default::default();
 	// Turfs with temperatures/heat capacities. This is distinct from the above.
-	static ref TURF_TEMPERATURES: DashMap<TurfID, ThermalInfo, FxBuildHasher> = DashMap::with_hasher(FxBuildHasher::default());
+	static ref TURF_TEMPERATURES: DashMap<TurfID, ThermalInfo, FxBuildHasher> = Default::default();
 	// We store planetary atmos by hash of the initial atmos string here for speed.
-	static ref PLANETARY_ATMOS: DashMap<u32, Mixture, FxBuildHasher> = DashMap::with_hasher(FxBuildHasher::default());
+	static ref PLANETARY_ATMOS: DashMap<u32, Mixture, FxBuildHasher> = Default::default();
 }
 
 #[shutdown]
 fn _shutdown_turfs() {
-	with_adjacency_write(|mut graph| graph.clear());
+	with_adjacency_write(|mut graph| {
+		graph.clear();
+	});
 	TURF_GASES.clear();
 	TURF_TEMPERATURES.clear();
 	PLANETARY_ATMOS.clear();
@@ -215,14 +203,14 @@ fn _shutdown_turfs() {
 
 pub fn with_adjacency_read<T, F>(f: F) -> T
 where
-	F: FnOnce(ShardedLockReadGuard<DiGraphMap<TurfID, u8>>) -> T,
+	F: FnOnce(ShardedLockReadGuard<DiGraphMap<usize, TurfID>>) -> T,
 {
 	f(TURF_ADJACENCIES.read().unwrap())
 }
 
 pub fn with_adjacency_write<T, F>(f: F) -> T
 where
-	F: FnOnce(ShardedLockWriteGuard<DiGraphMap<TurfID, u8>>) -> T,
+	F: FnOnce(ShardedLockWriteGuard<DiGraphMap<usize, TurfID>>) -> T,
 {
 	f(TURF_ADJACENCIES.write().unwrap())
 }
@@ -254,6 +242,11 @@ fn _hook_register_turf() {
 	if simulation_level < 0.0 {
 		let id = unsafe { src.raw.data.id };
 		drop(sender.send(Box::new(move || {
+			with_adjacency_write(|mut graph| {
+				turf_gases()
+					.get(&id)
+					.and_then(|thin| Some(graph.remove_node(thin.mix)));
+			});
 			turf_gases().remove(&id);
 			Ok(Value::null())
 		})));
@@ -411,23 +404,54 @@ fn _hook_infos(arg0: Value, arg1: Value) {
 	let boxed_fn: Box<dyn Fn() -> DMResult + Send + Sync> = Box::new(move || {
 		let src_turf = unsafe { Value::turf_by_id_unchecked(id) };
 		if let Ok(adjacent_list) = src_turf.get_list(byond_string!("atmos_adjacent_turfs")) {
-			with_adjacency_write(|mut graph| -> DMResult {
+			with_adjacency_write(|mut graph| -> Result<(), Runtime> {
 				//Can't just fucking remove it because mut borrows and borrows don't mix
+				//Why isn't there a function for this
+				if let Some(mix_info) = turf_gases().get(&id) {
+					let old_neighbors = graph
+						.neighbors_directed(mix_info.mix, petgraph::Outgoing)
+						.collect::<Vec<_>>();
+					old_neighbors.into_iter().for_each(|other| {
+						graph.remove_edge(mix_info.mix, other);
+					});
+
+					for i in 1..=adjacent_list.len() {
+						let adj_val = adjacent_list.get(i)?;
+						//let adjacent_num = adjacent_list.get(&adj_val)?.as_number()? as u8;
+						//graph.add_edge(id, unsafe { adj_val.raw.data.id }, adjacent_num);
+						turf_gases()
+							.get(&unsafe { adj_val.raw.data.id })
+							.and_then(|adj_info| {
+								graph.add_edge(mix_info.mix, adj_info.mix, unsafe {
+									adj_val.raw.data.id
+								});
+								Some(())
+							});
+					}
+				};
+				/*
 				let old_neighbors = graph
 					.neighbors_directed(id, petgraph::Outgoing)
 					.collect::<Vec<_>>();
 				old_neighbors.into_iter().for_each(|other| {
 					graph.remove_edge(id, other);
 				});
+
 				for i in 1..=adjacent_list.len() {
 					let adj_val = adjacent_list.get(i)?;
 					let adjacent_num = adjacent_list.get(&adj_val)?.as_number()? as u8;
 					graph.add_edge(id, unsafe { adj_val.raw.data.id }, adjacent_num);
+
 				}
-				Ok(Value::null())
+				*/
+				Ok(())
 			})?;
 		} else {
-			with_adjacency_write(|mut graph| graph.remove_node(id));
+			with_adjacency_write(|mut graph| {
+				turf_gases()
+					.get(&id)
+					.and_then(|thin| Some(graph.remove_node(thin.mix)));
+			});
 		}
 		if let Ok(blocks_air) = src_turf.get_number(byond_string!("blocks_air")) {
 			if blocks_air == 0.0 {

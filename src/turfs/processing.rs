@@ -319,15 +319,18 @@ fn _process_turf_start() -> Result<(), String> {
 }
 
 // Compares with neighbors, returning early if any of them are valid.
-fn should_process(i: TurfID, m: TurfMixture, all_mixtures: &[RwLock<Mixture>]) -> bool {
-	with_adjacency_read(|graph| graph.edges_directed(i, petgraph::Outgoing).any(|_| true))
-		&& m.enabled()
+fn should_process(m: TurfMixture, all_mixtures: &[RwLock<Mixture>]) -> bool {
+	with_adjacency_read(|graph| {
+		graph
+			.edges_directed(m.mix, petgraph::Outgoing)
+			.any(|_| true)
+	}) && m.enabled()
 		&& all_mixtures
 			.get(m.mix)
 			.and_then(RwLock::try_read)
 			.map_or(false, |gas| {
 				with_adjacency_read(|graph| {
-					for entry in m.adjacent_mixes(all_mixtures, i, &graph) {
+					for entry in m.adjacent_mixes(all_mixtures, &graph) {
 						if let Some(mix) = entry.try_read() {
 							if gas.temperature_compare(&mix)
 								|| gas.compare_with(&mix, MINIMUM_MOLES_DELTA_TO_MOVE)
@@ -376,7 +379,7 @@ fn process_cell(
 		Technically that's ρν², but, like, video games.
 	*/
 	let result = with_adjacency_read(|graph| {
-		for (j, loc, entry) in m.adjacent_mixes_with_adj_info(all_mixtures, i, &graph) {
+		for (j, loc, entry) in m.adjacent_mixes_with_adj_info(all_mixtures, &graph) {
 			match entry.try_read() {
 				Some(mix) => {
 					end_gas.merge(&mix);
@@ -451,7 +454,7 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 					let (&i, &m) = entry.pair();
 					(i, m)
 				})
-				.filter(|&(i, m)| should_process(i, m, all_mixtures))
+				.filter(|&(_, m)| should_process(m, all_mixtures))
 				.filter_map(|(i, m)| process_cell(i, m, all_mixtures))
 				.collect::<Vec<_>>();
 			/*
@@ -573,7 +576,7 @@ fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<TurfID>
 				if turfs.len() >= 2500 {
 					break;
 				}
-				if let Some((i, turf)) = border_turfs.pop_front() {
+				if let Some((_, turf)) = border_turfs.pop_front() {
 					if let Some(lock) = all_mixtures.get(turf.mix) {
 						let mix = lock.read();
 						let pressure = mix.return_pressure();
@@ -588,7 +591,7 @@ fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<TurfID>
 						fully_mixed.merge(&mix);
 						fully_mixed.volume += mix.volume;
 						with_adjacency_read(|graph| {
-							for loc in graph.neighbors_directed(i, petgraph::Outgoing) {
+							for (_, _, &loc) in graph.edges_directed(turf.mix, petgraph::Outgoing) {
 								if found_turfs.contains(&loc) {
 									continue;
 								}
