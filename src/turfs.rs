@@ -82,7 +82,7 @@ impl TurfMixture {
 		graph: &'a RwLockReadGuard<DiGraphMap<usize, TurfID>>,
 	) -> impl Iterator<Item = &'a parking_lot::RwLock<Mixture>> {
 		graph
-			.neighbors_directed(self.mix, petgraph::Outgoing)
+			.neighbors(self.mix)
 			.filter_map(move |idx| all_mixtures.get(idx))
 	}
 	pub fn adjacent_mixes_with_adj_info<'a>(
@@ -91,8 +91,24 @@ impl TurfMixture {
 		graph: &'a RwLockReadGuard<DiGraphMap<usize, TurfID>>,
 	) -> impl Iterator<Item = (TurfID, &'a parking_lot::RwLock<Mixture>)> {
 		graph
-			.edges_directed(self.mix, petgraph::Outgoing)
+			.edges(self.mix)
 			.filter_map(move |(_, idx, &turfid)| all_mixtures.get(idx).map(|mix| (turfid, mix)))
+	}
+	fn adjacents<'a>(
+		&self,
+		graphlock: &'a RwLockReadGuard<DiGraphMap<usize, TurfID>>,
+	) -> impl Iterator<Item = &'a TurfID> {
+		graphlock.edges(self.mix).map(|(_, _, adj)| adj)
+	}
+
+	fn adjacents_enabled<'a>(
+		&self,
+		mixlock: &'a RwLockReadGuard<HashMap<TurfID, TurfMixture, FxBuildHasher>>,
+		graphlock: &'a RwLockReadGuard<DiGraphMap<usize, TurfID>>,
+	) -> impl Iterator<Item = &'a TurfID> {
+		graphlock
+			.edges(self.mix)
+			.filter_map(|(_, _, adj)| mixlock.get(adj).and_then(|mx| mx.enabled().then(|| adj)))
 	}
 	pub fn is_immutable(&self) -> bool {
 		GasArena::with_all_mixtures(|all_mixtures| {
@@ -202,6 +218,7 @@ impl TurfGases {
 	pub fn disable_turf(&self, idx: TurfID) {
 		self.mixtures.write().entry(idx).and_modify(|tmix| {
 			tmix.flags |= SIMULATION_DISABLED;
+			//self.adjacencies.write().remove_node(tmix.mix);
 		});
 	}
 

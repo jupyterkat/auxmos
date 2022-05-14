@@ -326,9 +326,7 @@ fn should_process(
 	all_mixtures: &[RwLock<Mixture>],
 	graph: &RwLockReadGuard<DiGraphMap<usize, TurfID>>,
 ) -> bool {
-	graph
-		.edges_directed(m.mix, petgraph::Outgoing)
-		.any(|_| true)
+	m.adjacents(&graph).next().is_some()
 		&& m.enabled()
 		&& all_mixtures
 			.get(m.mix)
@@ -596,7 +594,7 @@ fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<TurfID>
 							turfs.push(turf);
 							fully_mixed.merge(&mix);
 							fully_mixed.volume += mix.volume;
-							for (_, _, &loc) in graph.edges_directed(turf.mix, petgraph::Outgoing) {
+							for &loc in turf.adjacents(&graph) {
 								if found_turfs.contains(&loc) {
 									continue;
 								}
