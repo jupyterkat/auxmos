@@ -293,12 +293,6 @@ impl TurfGases {
 }
 
 lazy_static::lazy_static! {
-	/*
-	// Adjacencies infos, nodes are mixids, edges are turfids
-	static ref TURF_ADJACENCIES: RwLock<DiGraphMap<usize, TurfID>> = Default::default();
-	// All the turfs that have gas mixtures.
-	static ref TURF_GASES: RwLock<HashMap<TurfID, TurfMixture, FxBuildHasher>> = Default::default();
-	*/
 	static ref TURF_GASES: TurfGases = Default::default();
 	// Turfs with temperatures/heat capacities. This is distinct from the above.
 	static ref TURF_TEMPERATURES: DashMap<TurfID, ThermalInfo, FxBuildHasher> = Default::default();
@@ -328,66 +322,59 @@ fn turf_temperatures() -> &'static DashMap<TurfID, ThermalInfo, FxBuildHasher> {
 
 #[hook("/turf/proc/update_air_ref")]
 fn _hook_register_turf() {
-	let simulation_level = args[0].as_number().map_err(|_| {
-		runtime!(
-			"Attempt to interpret non-number value as number {} {}:{}",
-			std::file!(),
-			std::line!(),
-			std::column!()
-		)
-	})?;
 	let sender = aux_callbacks_sender(crate::callbacks::TURFS);
-	if simulation_level < 0.0 {
-		let id = unsafe { src.raw.data.id };
-		drop(sender.send(Box::new(move || {
-			turf_gases().remove_turf(id);
-			Ok(Value::null())
-		})));
-		Ok(Value::null())
-	} else {
-		let mut to_insert: TurfMixture = TurfMixture::default();
-		let air = src.get(byond_string!("air"))?;
-		to_insert.mix = air
-			.get_number(byond_string!("_extools_pointer_gasmixture"))
-			.map_err(|_| {
-				runtime!(
-					"Attempt to interpret non-number value as number {} {}:{}",
-					std::file!(),
-					std::line!(),
-					std::column!()
-				)
-			})?
-			.to_bits() as usize;
-		to_insert.flags = args[0].as_number().map_err(|_| {
-			runtime!(
-				"Attempt to interpret non-number value as number {} {}:{}",
-				std::file!(),
-				std::line!(),
-				std::column!()
-			)
-		})? as u8;
-		if let Ok(is_planet) = src.get_number(byond_string!("planetary_atmos")) {
-			if is_planet != 0.0 {
-				if let Ok(at_str) = src.get_string(byond_string!("initial_gas_mix")) {
-					to_insert.planetary_atmos = Some(fxhash::hash32(&at_str));
-					let mut entry = planetary_atmos()
-						.entry(to_insert.planetary_atmos.unwrap())
-						.or_insert_with(|| {
-							let mut gas = to_insert.get_gas_copy();
-							gas.mark_immutable();
-							gas
-						});
-					entry.mark_immutable();
+	let id = unsafe { src.raw.data.id };
+	drop(sender.send(Box::new(move || {
+		let src = unsafe { Value::turf_by_id_unchecked(id) };
+		let simulation_level =
+			src.get(byond_string!("atmos_flags"))?
+				.as_number()
+				.map_err(|_| {
+					runtime!(
+						"Attempt to interpret non-number value as number {} {}:{}",
+						std::file!(),
+						std::line!(),
+						std::column!()
+					)
+				})?;
+		if simulation_level >= 0.0 {
+			let mut to_insert: TurfMixture = TurfMixture::default();
+			let air = src.get(byond_string!("air"))?;
+			to_insert.mix = air
+				.get_number(byond_string!("_extools_pointer_gasmixture"))
+				.map_err(|_| {
+					runtime!(
+						"Attempt to interpret non-number value as number {} {}:{}",
+						std::file!(),
+						std::line!(),
+						std::column!()
+					)
+				})?
+				.to_bits() as usize;
+			to_insert.flags = simulation_level as u8;
+
+			if let Ok(is_planet) = src.get_number(byond_string!("planetary_atmos")) {
+				if is_planet != 0.0 {
+					if let Ok(at_str) = src.get_string(byond_string!("initial_gas_mix")) {
+						to_insert.planetary_atmos = Some(fxhash::hash32(&at_str));
+						let mut entry = planetary_atmos()
+							.entry(to_insert.planetary_atmos.unwrap())
+							.or_insert_with(|| {
+								let mut gas = to_insert.get_gas_copy();
+								gas.mark_immutable();
+								gas
+							});
+						entry.mark_immutable();
+					}
 				}
 			}
-		}
-		let id = unsafe { src.raw.data.id };
-		drop(sender.send(Box::new(move || {
 			turf_gases().insert_turf(id, to_insert);
-			Ok(Value::null())
-		})));
+		} else {
+			turf_gases().remove_turf(id);
+		}
 		Ok(Value::null())
-	}
+	})));
+	Ok(Value::null())
 }
 
 #[hook("/turf/proc/__auxtools_update_turf_temp_info")]

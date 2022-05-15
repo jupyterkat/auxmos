@@ -786,16 +786,15 @@ pub(crate) fn equalize(
 
 				let m = *adj_map.get(&i)?;
 				if !m.enabled()
-					|| !adj_graph
-						.neighbors(m.mix)
-						.next().is_some() || GasArena::with_all_mixtures(|all_mixtures| {
-					let our_moles = all_mixtures[m.mix].read().total_moles();
-					our_moles < 10.0
-						|| m.adjacent_mixes(all_mixtures, &adj_graph).all(|lock| {
-							(lock.read().total_moles() - our_moles).abs()
-								< MINIMUM_MOLES_DELTA_TO_MOVE
-						})
-				}) {
+					|| !adj_graph.neighbors(m.mix).next().is_some()
+					|| GasArena::with_all_mixtures(|all_mixtures| {
+						let our_moles = all_mixtures[m.mix].read().total_moles();
+						our_moles < 10.0
+							|| m.adjacent_mixes(all_mixtures, &adj_graph).all(|lock| {
+								(lock.read().total_moles() - our_moles).abs()
+									< MINIMUM_MOLES_DELTA_TO_MOVE
+							})
+					}) {
 					return None;
 				}
 				flood_fill_equalize_turfs(
