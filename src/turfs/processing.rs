@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use auxtools::*;
 
@@ -375,7 +375,7 @@ fn process_cell(
 		absolutely need to. Saving is fast enough.
 	*/
 	let mut end_gas = Mixture::from_vol(crate::constants::CELL_VOLUME);
-	let mut pressure_diffs: TinyVec<[(TurfID, f32); 6]> = TinyVec::from([(0, 0.0); 6]);
+	let mut pressure_diffs: TinyVec<[(TurfID, f32); 6]> = Default::default();
 	/*
 		The pressure here is negative
 		because we're going to be adding it
@@ -543,8 +543,8 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 							})));
 						});
 				}
-				high_pressure_turfs.extend(high_pressure.iter().map(|(i, _, _)| i));
-				low_pressure_turfs.extend(low_pressure.iter().map(|(i, _, _)| i));
+				high_pressure_turfs.par_extend(high_pressure.par_iter().map(|(i, _, _)| i));
+				low_pressure_turfs.par_extend(low_pressure.par_iter().map(|(i, _, _)| i));
 			});
 			cur_count += 1;
 		}
@@ -554,7 +554,7 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 
 // Finds small differences in turf pressures and equalizes them.
 fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<TurfID>) -> usize {
-	let mut found_turfs: BTreeSet<TurfID> = BTreeSet::new();
+	let mut found_turfs: HashSet<TurfID, FxBuildHasher> = Default::default();
 	turf_gases().with_read(|map, graph| {
 		GasArena::with_all_mixtures(|all_mixtures| {
 			for &initial_turf in low_pressure_turfs {
