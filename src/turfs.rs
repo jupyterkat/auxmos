@@ -296,9 +296,9 @@ fn _initialize_turf_statics() -> Result<(), String> {
 #[shutdown]
 fn _shutdown_turfs() {
 	unsafe {
-	TURF_GASES = None;
-	TURF_TEMPERATURES = None;
-	PLANETARY_ATMOS = None;
+		TURF_GASES = None;
+		TURF_TEMPERATURES = None;
+		PLANETARY_ATMOS = None;
 	}
 }
 

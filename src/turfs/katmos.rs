@@ -118,7 +118,7 @@ fn finalize_eq(
 	if let Some(&planet_transfer_amount) = transfer_dirs.get(&None) {
 		if planet_transfer_amount > 0.0 {
 			if turf.total_moles() < planet_transfer_amount {
-				finalize_eq_neighbors(turf, arena ,&transfer_dirs, info, eq_movement_graph);
+				finalize_eq_neighbors(turf, arena, &transfer_dirs, info, eq_movement_graph);
 			}
 			drop(GasArena::with_gas_mixture_mut(turf.mix, |gas| {
 				gas.add(-planet_transfer_amount);
@@ -728,7 +728,8 @@ fn process_planet_turfs(
 						Ok(Value::null())
 					})));
 				}
-				if let Some(adj) = arena.mixtures
+				if let Some(adj) = arena
+					.mixtures
 					.get(&adj_idx)
 					.and_then(|terf| terf.enabled().then(|| terf))
 				{
@@ -790,13 +791,7 @@ pub(crate) fn equalize(
 					}) {
 					return None;
 				}
-				flood_fill_equalize_turfs(
-					i,
-					m,
-					equalize_hard_turf_limit,
-					&mut found_turfs,
-					&arena
-				)
+				flood_fill_equalize_turfs(i, m, equalize_hard_turf_limit, &mut found_turfs, &arena)
 			})
 			.collect::<Vec<_>>();
 
