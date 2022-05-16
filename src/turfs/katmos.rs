@@ -59,19 +59,6 @@ impl Default for ReducedInfo {
 	}
 }
 
-/*
-impl MonstermosInfo {
-	fn adjust_eq_movement(&mut self, adjacent: Option<&mut Self>, amount: f32) {
-		self.transfer_dirs[dir_index] += amount;
-		if let Some(adj) = adjacent {
-			if dir_index != 6 {
-				adj.transfer_dirs[OPP_DIR_INDEX[dir_index]] -= amount;
-			}
-		}
-	}
-}
-*/
-
 fn adjust_eq_movement(
 	this_turf: Option<TurfID>,
 	that_turf: Option<TurfID>,
@@ -147,12 +134,9 @@ fn finalize_eq(
 				finalize_eq_neighbors(turf, arena, &transfer_dirs, info, eq_movement_graph);
 			}
 			if let Some(adj_tmix) = arena.get(&adj_turf) {
-				eq_movement_graph
-					.edge_weight_mut(Some(adj_turf), Some(i))
-					.and_then(|amt| {
-						*amt = 0.0;
-						Some(())
-					});
+				if let Some(amt) = eq_movement_graph.edge_weight_mut(Some(adj_turf), Some(i)) {
+					*amt = 0.0;
+				}
 				if turf.mix != adj_tmix.mix {
 					drop(GasArena::with_gas_mixtures_mut(
 						turf.mix,
@@ -222,8 +206,8 @@ fn monstermos_fast_process(
 	let mut eligible_adjacents: Vec<usize> = Default::default();
 	if cur_info.mole_delta > 0.0 {
 		for adj_turf in m.adjacents_enabled(arena) {
-			if let Some(adj_mix) = arena.get(&adj_turf) {
-				if let Some(adj_info) = info.get(&adj_turf) {
+			if let Some(adj_mix) = arena.get(adj_turf) {
+				if let Some(adj_info) = info.get(adj_turf) {
 					if !adj_info.fast_done {
 						eligible_adjacents.push(adj_mix.mix);
 					}
@@ -236,15 +220,14 @@ fn monstermos_fast_process(
 		}
 		let moles_to_move = cur_info.mole_delta / eligible_adjacents.len() as f32;
 		eligible_adjacents.into_iter().for_each(|item| {
-			arena.adjacencies.edge_weight(m.mix, item).and_then(|&idx| {
+			if let Some(&idx) = arena.adjacencies.edge_weight(m.mix, item) {
 				if let Some(mut adj_info) = info.get_mut(&idx) {
 					adjust_eq_movement(Some(i), Some(idx), moles_to_move, eq_movement_graph);
 					cur_info.mole_delta -= moles_to_move;
 					adj_info.mole_delta += moles_to_move;
 				}
 				info.entry(i).and_modify(|entry| *entry = cur_info);
-				Some(())
-			});
+			};
 		});
 	}
 }
@@ -417,6 +400,8 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 	turfs.insert(turf_idx);
 	let mut warned_about_planet_atmos = false;
 	let mut cur_queue_idx = 0;
+
+	//1st floodfill
 	with_turf_gases_read(|arena| -> Result<(), Runtime> {
 		while cur_queue_idx < turfs.len() {
 			let i = turfs[cur_queue_idx];
@@ -470,12 +455,14 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 		return Ok(Value::null()); // planet atmos > space
 	}
 
+	//actually update the damn arena to register the firelocks closing
 	process_aux_callbacks(crate::callbacks::TURFS);
 	process_aux_callbacks(crate::callbacks::ADJACENCIES);
 
 	if space_turfs.is_empty() {
 		return Ok(Value::null());
 	}
+
 	with_turf_gases_read(|arena| {
 		for &i in space_turfs.iter() {
 			let maybe_turf = arena.get(&i);
@@ -490,6 +477,7 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 	cur_queue_idx = 0;
 	let mut space_turf_len = 0;
 	let mut total_moles = 0.0;
+	//2nd floodfill
 	with_turf_gases_read(|arena| -> Result<(), Runtime> {
 		while cur_queue_idx < progression_order.len() {
 			let (i, m) = progression_order[cur_queue_idx];
@@ -535,12 +523,8 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 			)
 		})?;
 
-	//server may not have multiz, and that's fine
-	let get_dir = if let Some(proc) = Proc::find(byond_string!("/proc/get_dir_multiz")) {
-		proc
-	} else {
-		Proc::find(byond_string!("/proc/get_dir")).unwrap()
-	};
+	//extremely unlikely that this unwrap fails
+	let get_dir = Proc::find(byond_string!("/proc/get_dir")).unwrap();
 	with_turf_gases_read(|thin| -> Result<(), Runtime> {
 		for (i, m) in progression_order.iter().rev() {
 			let cur_orig = info.entry(*i).or_default();
@@ -584,7 +568,7 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 			)?;
 			byond_turf.set(
 				byond_string!("pressure_direction"),
-				Value::from(get_dir.call(&[&byond_turf, &byond_turf_adj])?),
+				get_dir.call(&[&byond_turf, &byond_turf_adj])?,
 			)?;
 
 			if adj_info.curr_transfer_dir.is_none() {
@@ -594,7 +578,7 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 				)?;
 				byond_turf_adj.set(
 					byond_string!("pressure_direction"),
-					Value::from(get_dir.call(&[&byond_turf_adj, &byond_turf])?),
+					get_dir.call(&[&byond_turf_adj, &byond_turf])?,
 				)?;
 			}
 
@@ -614,8 +598,6 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 	})?;
 
 	Ok(Value::null())
-	//	if (total_gases_deleted / turfs.len() as f32) > 20.0 && turfs.len() > 10 { // logging I guess
-	//	}
 }
 
 // Clippy go away, this type is only used once
@@ -764,33 +746,36 @@ fn process_planet_turfs(
 	}
 }
 
-pub(crate) fn equalize(
-	equalize_hard_turf_limit: usize,
-	high_pressure_turfs: &Vec<TurfID>,
-) -> usize {
+pub(crate) fn equalize(equalize_hard_turf_limit: usize, high_pressure_turfs: &[TurfID]) -> usize {
 	let turfs_processed: AtomicUsize = AtomicUsize::new(0);
 	let mut found_turfs: HashSet<TurfID, FxBuildHasher> = Default::default();
 	with_turf_gases_read(|arena| {
 		let zoned_turfs = high_pressure_turfs
 			.iter()
 			.filter_map(|&i| {
+				//is this turf already visited?
 				if found_turfs.contains(&i) {
 					return None;
 				};
 
+				//is this turf exists/enabled/have adjacencies?
 				let m = *arena.get(&i)?;
-				if !m.enabled()
-					|| !arena.adjacencies.neighbors(m.mix).next().is_some()
-					|| GasArena::with_all_mixtures(|all_mixtures| {
-						let our_moles = all_mixtures[m.mix].read().total_moles();
-						our_moles < 10.0
-							|| m.adjacent_mixes(all_mixtures, &arena).all(|lock| {
-								(lock.read().total_moles() - our_moles).abs()
-									< MINIMUM_MOLES_DELTA_TO_MOVE
-							})
-					}) {
+				if !m.enabled() || arena.adjacencies.neighbors(m.mix).next().is_none() {
 					return None;
 				}
+
+				//does this turf or its adjacencies have enough moles to share?
+				if GasArena::with_all_mixtures(|all_mixtures| {
+					let our_moles = all_mixtures[m.mix].read().total_moles();
+					our_moles < 10.0
+						|| m.adjacent_mixes(all_mixtures, &arena).all(|lock| {
+							(lock.read().total_moles() - our_moles).abs()
+								< MINIMUM_MOLES_DELTA_TO_MOVE
+						})
+				}) {
+					return None;
+				}
+
 				flood_fill_equalize_turfs(i, m, equalize_hard_turf_limit, &mut found_turfs, &arena)
 			})
 			.collect::<Vec<_>>();
@@ -829,7 +814,7 @@ pub(crate) fn equalize(
 					taker_turfs.clear();
 
 					giver_turfs.par_extend(turfs.par_iter().filter(|&i| {
-						if let Some(m) = arena.get(&i) {
+						if let Some(m) = arena.get(i) {
 							info.entry(*i).or_default().mole_delta > 0.0
 								&& m.planetary_atmos.is_none()
 						} else {
@@ -838,7 +823,7 @@ pub(crate) fn equalize(
 					}));
 
 					taker_turfs.par_extend(turfs.par_iter().filter(|&i| {
-						if let Some(m) = arena.get(&i) {
+						if let Some(m) = arena.get(i) {
 							info.entry(*i).or_default().mole_delta <= 0.0
 								&& m.planetary_atmos.is_none()
 						} else {

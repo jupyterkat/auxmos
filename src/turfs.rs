@@ -249,12 +249,11 @@ impl TurfGases {
 				}
 			}
 			for idx in new_list {
-				self.mixtures.get(&idx).and_then(|adj_info| {
+				if let Some(adj_info) = self.mixtures.get(&idx) {
 					if !old_edges.contains_key(&idx) {
 						self.adjacencies.add_edge(mix_info.mix, adj_info.mix, idx);
 					}
-					Some(())
-				});
+				}
 			}
 		};
 		Ok(())
@@ -263,7 +262,7 @@ impl TurfGases {
 	pub fn remove_adjacencies(&mut self, idx: TurfID) {
 		self.mixtures
 			.get(&idx)
-			.and_then(|thin| Some(self.adjacencies.remove_node(thin.mix)));
+			.map(|thin| self.adjacencies.remove_node(thin.mix));
 	}
 
 	pub fn get(&self, idx: &TurfID) -> Option<&TurfMixture> {

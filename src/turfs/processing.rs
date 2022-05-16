@@ -386,7 +386,7 @@ fn process_cell(
 		due to the pressure gradient.
 		Technically that's ρν², but, like, video games.
 	*/
-	for (loc, entry) in m.adjacent_mixes_with_adj_info(all_mixtures, &arena) {
+	for (loc, entry) in m.adjacent_mixes_with_adj_info(all_mixtures, arena) {
 		match entry.try_read() {
 			Some(mix) => {
 				end_gas.merge(&mix);
