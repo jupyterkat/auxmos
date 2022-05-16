@@ -523,8 +523,6 @@ fn explosively_depressurize(turf_idx: TurfID, equalize_hard_turf_limit: usize) -
 			)
 		})?;
 
-	//extremely unlikely that this unwrap fails
-	let get_dir = Proc::find(byond_string!("/proc/get_dir")).unwrap();
 	with_turf_gases_read(|thin| -> Result<(), Runtime> {
 		for (i, m) in progression_order.iter().rev() {
 			let cur_orig = info.entry(*i).or_default();

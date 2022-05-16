@@ -609,6 +609,10 @@ fn adjacent_tile_id(id: u8, i: TurfID, max_x: i32, max_y: i32) -> TurfID {
 		_ => i as TurfID,
 	}
 }
+
+const fn get_dir(origin: TurfID, target: TurfID) -> u8 {
+	
+}
 #[derive(Clone, Copy)]
 struct AdjacentTileIDs {
 	adj: u8,
