@@ -733,12 +733,15 @@ fn process_planet_turfs(
 	Ok(Value::null())
 }
 
+#[deprecated(
+	note = "Katmos should be used intead of Monstermos or Putnamos, as that one is actively maintained."
+)]
 pub(crate) fn equalize(
 	equalize_turf_limit: usize,
 	equalize_hard_turf_limit: usize,
 	max_x: i32,
 	max_y: i32,
-	high_pressure_turfs: BTreeSet<TurfID>,
+	high_pressure_turfs: &BTreeSet<TurfID>,
 	do_planet_atmos: bool,
 ) -> usize {
 	let mut info: HashMap<TurfID, Cell<MonstermosInfo>, FxBuildHasher> =
