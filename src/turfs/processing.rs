@@ -823,11 +823,11 @@ fn _process_heat_notify() {
 			)
 		})? as i32;
 	process_aux_callbacks(crate::callbacks::TEMPERATURE);
-	drop(sender.try_send(SSheatInfo {
+	let _ = sender.try_send(SSheatInfo {
 		time_delta,
 		max_x,
 		max_y,
-	}));
+	});
 	Ok(Value::null())
 }
 
