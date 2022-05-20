@@ -395,9 +395,9 @@ fn _hook_register_turf() {
 					}
 				}
 			}
-			with_turf_gases_write(|mut thin| thin.insert_turf(id, to_insert));
+			with_turf_gases_write(|mut arena| arena.insert_turf(id, to_insert));
 		} else {
-			with_turf_gases_write(|mut thin| thin.remove_turf(id));
+			with_turf_gases_write(|mut arena| arena.remove_turf(id));
 		}
 		Ok(Value::null())
 	})));
@@ -508,17 +508,17 @@ fn _hook_infos(arg0: Value, arg1: Value) {
 	let sender = aux_callbacks_sender(crate::callbacks::ADJACENCIES);
 	let boxed_fn: Box<dyn Fn() -> DMResult + Send + Sync> = Box::new(move || {
 		let src_turf = unsafe { Value::turf_by_id_unchecked(id) };
-		with_turf_gases_write(|mut thin| -> Result<(), Runtime> {
+		with_turf_gases_write(|mut arena| -> Result<(), Runtime> {
 			if let Ok(adjacent_list) = src_turf.get_list(byond_string!("atmos_adjacent_turfs")) {
-				thin.update_adjacencies(id, adjacent_list)?;
+				arena.update_adjacencies(id, adjacent_list)?;
 			} else {
-				thin.remove_adjacencies(id);
+				arena.remove_adjacencies(id);
 			}
 			if let Ok(blocks_air) = src_turf.get_number(byond_string!("blocks_air")) {
 				if blocks_air == 0.0 {
-					thin.enable_turf(id)
+					arena.enable_turf(id)
 				} else {
-					thin.disable_turf(id)
+					arena.disable_turf(id)
 				}
 			}
 			Ok(())

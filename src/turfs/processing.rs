@@ -431,17 +431,16 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<NodeIndex>, Vec<NodeI
 	let mut low_pressure_turfs: Vec<NodeIndex> = Vec::new();
 	let mut high_pressure_turfs: Vec<NodeIndex> = Vec::new();
 	let mut cur_count = 1;
-	with_turf_gases_read(|thin| {
+	with_turf_gases_read(|arena| {
 		loop {
 			if cur_count > fdm_max_steps {
 				break;
 			}
 			GasArena::with_all_mixtures(|all_mixtures| {
-				let turfs_to_save = thin
-					.graph
-					.raw_nodes()
+				let turfs_to_save = arena
 					/*
-						This uses DashMap's rayon feature to parallelize the process.
+						This directly yoinks the internal node vec
+						of the graph as a slice to parallelize the process.
 						The speedup gained from this is actually linear
 						with the amount of cores the CPU has, which, to be frank,
 						is way better than I was expecting, even though this operation
@@ -449,12 +448,14 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<NodeIndex>, Vec<NodeI
 						some maximum due to the global turf mixture lock access,
 						but it's already blazingly fast on my i7, so it should be fine.
 					*/
+					.graph
+					.raw_nodes()
 					.par_iter()
 					.enumerate()
 					.filter_map(|(index, node)| Some((NodeIndex::from(index as u32), node.weight?)))
-					.filter(|(index, mixture)| should_process(*index, mixture, all_mixtures, &thin))
+					.filter(|(index, mixture)| should_process(*index, mixture, all_mixtures, &arena))
 					.filter_map(|(index, mixture)| {
-						process_cell(index, mixture, all_mixtures, &thin)
+						process_cell(index, mixture, all_mixtures, &arena)
 					})
 					.collect::<Vec<_>>();
 				/*
@@ -468,7 +469,7 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<NodeIndex>, Vec<NodeI
 				let (low_pressure, high_pressure): (Vec<_>, Vec<_>) = turfs_to_save
 					.into_par_iter()
 					.filter_map(|(i, end_gas, mut pressure_diffs, adj_amount)| {
-						let m = thin.get(i).unwrap();
+						let m = arena.get(i).unwrap();
 						all_mixtures.get(m.mix).map(|entry| {
 							let mut max_diff = 0.0_f32;
 							let moved_pressure = {
@@ -516,7 +517,7 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<NodeIndex>, Vec<NodeI
 				if !equalize_enabled {
 					let pressure_deltas_fixed = high_pressure
 						.into_par_iter()
-						.filter_map(|(index, diffs, _)| Some((thin.get(index)?.id, diffs)))
+						.filter_map(|(index, diffs, _)| Some((arena.get(index)?.id, diffs)))
 						.collect::<Vec<_>>();
 					let pressure_deltas_chunked =
 						pressure_deltas_fixed.par_chunks(20).collect::<Vec<_>>();
