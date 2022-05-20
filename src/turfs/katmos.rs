@@ -19,8 +19,6 @@ use crate::callbacks::process_aux_callbacks;
 
 use auxcallback::byond_callback_sender;
 
-use dashmap::DashMap;
-
 use parking_lot::RwLockReadGuard;
 
 type MixWithID = (NodeIndex, TurfMixture);
@@ -87,7 +85,7 @@ fn finalize_eq(
 	index: NodeIndex,
 	turf: &TurfMixture,
 	arena: &RwLockReadGuard<TurfGases>,
-	info: &DashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
+	info: &HashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
 	eq_movement_graph: &mut DiGraphMap<Option<NodeIndex>, f32>,
 ) {
 	let sender = byond_callback_sender();
@@ -175,7 +173,7 @@ fn finalize_eq_neighbors(
 	index: NodeIndex,
 	arena: &RwLockReadGuard<TurfGases>,
 	transfer_dirs: &HashMap<Option<NodeIndex>, f32, FxBuildHasher>,
-	info: &DashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
+	info: &HashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
 	eq_movement_graph: &mut DiGraphMap<Option<NodeIndex>, f32>,
 ) {
 	for adj_index in arena.adjacent_node_ids(index) {
@@ -196,7 +194,7 @@ fn finalize_eq_neighbors(
 fn monstermos_fast_process(
 	cur_index: NodeIndex,
 	arena: &RwLockReadGuard<TurfGases>,
-	info: &DashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
+	info: &mut HashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
 	eq_movement_graph: &mut DiGraphMap<Option<NodeIndex>, f32>,
 ) {
 	let mut cur_info = {
@@ -241,7 +239,7 @@ fn monstermos_fast_process(
 fn give_to_takers(
 	giver_turfs: &[RefMixWithID],
 	arena: &RwLockReadGuard<TurfGases>,
-	info: &DashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
+	info: &mut HashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
 	eq_movement_graph: &mut DiGraphMap<Option<NodeIndex>, f32>,
 ) {
 	let mut queue: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
@@ -322,7 +320,7 @@ fn give_to_takers(
 fn take_from_givers(
 	taker_turfs: &[RefMixWithID],
 	arena: &RwLockReadGuard<TurfGases>,
-	info: &DashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
+	info: &mut HashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
 	eq_movement_graph: &mut DiGraphMap<Option<NodeIndex>, f32>,
 ) {
 	let mut queue: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
@@ -657,7 +655,7 @@ fn process_planet_turfs(
 	arena: &RwLockReadGuard<TurfGases>,
 	average_moles: f32,
 	equalize_hard_turf_limit: usize,
-	info: &DashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
+	info: &mut HashMap<NodeIndex, MonstermosInfo, FxBuildHasher>,
 	eq_movement_graph: &mut DiGraphMap<Option<NodeIndex>, f32>,
 ) {
 	let sender = byond_callback_sender();
@@ -728,22 +726,28 @@ fn process_planet_turfs(
 		if arena.get(cur_index).is_none() {
 			continue;
 		}
-		if let Some(mut cur_info) = info.get_mut(&cur_index) {
-			let airflow = cur_info.mole_delta - target_delta;
-			if cur_info.curr_transfer_dir.is_none() {
-				adjust_eq_movement(Some(cur_index), None, airflow, eq_movement_graph);
-				cur_info.mole_delta = target_delta;
-			} else if let Some(mut adj_info) = info.get_mut(&cur_info.curr_transfer_dir.unwrap()) {
-				adjust_eq_movement(
-					Some(cur_index),
-					cur_info.curr_transfer_dir,
-					airflow,
-					eq_movement_graph,
-				);
-				adj_info.mole_delta += airflow;
-				cur_info.mole_delta = target_delta;
+		let mut cur_info = {
+			if let Some(opt) = info.get(&cur_index) {
+				*opt
+			} else {
+				continue;
 			}
+		};
+		let airflow = cur_info.mole_delta - target_delta;
+		if cur_info.curr_transfer_dir.is_none() {
+			adjust_eq_movement(Some(cur_index), None, airflow, eq_movement_graph);
+			cur_info.mole_delta = target_delta;
+		} else if let Some(mut adj_info) = info.get_mut(&cur_info.curr_transfer_dir.unwrap()) {
+			adjust_eq_movement(
+				Some(cur_index),
+				cur_info.curr_transfer_dir,
+				airflow,
+				eq_movement_graph,
+			);
+			adj_info.mole_delta += airflow;
+			cur_info.mole_delta = target_delta;
 		}
+		info.entry(cur_index).and_modify(|info| *info = cur_info);
 	}
 }
 
@@ -792,36 +796,38 @@ pub(crate) fn equalize(
 		let turfs = zoned_turfs
 			.into_par_iter()
 			.map(|(turfs, planet_turfs, total_moles)| {
-				let info: DashMap<NodeIndex, MonstermosInfo, FxBuildHasher> = Default::default();
 				let mut graph: DiGraphMap<Option<NodeIndex>, f32> = Default::default();
 				let average_moles =
 					(total_moles / (turfs.len() - planet_turfs.len()) as f64) as f32;
 
-				let (mut giver_turfs, mut taker_turfs): (Vec<_>, Vec<_>) = turfs
+				let mut info = turfs
 					.par_iter()
-					.filter(|(&i, cur_mixture)| {
-						{
-							let mut cur_info = info.entry(i).or_default();
-							cur_info.mole_delta = cur_mixture.total_moles() - average_moles;
-						}
-						cur_mixture.planetary_atmos.is_none()
+					.map(|(&index, mixture)| {
+						let mut cur_info = MonstermosInfo::default();
+						cur_info.mole_delta = mixture.total_moles() - average_moles;
+						(index, cur_info)
 					})
-					.partition(|(&i, _)| info.entry(i).or_default().mole_delta > 0.0);
+					.collect::<HashMap<_, _, FxBuildHasher>>();
+
+				let (mut giver_turfs, mut taker_turfs): (Vec<_>, Vec<_>) = turfs
+					.iter()
+					.filter(|(_, cur_mixture)| cur_mixture.planetary_atmos.is_none())
+					.partition(|(i, _)| info.get(i).unwrap().mole_delta > 0.0);
 
 				let log_n = ((turfs.len() as f32).log2().floor()) as usize;
 				if giver_turfs.len() > log_n && taker_turfs.len() > log_n {
 					for (&cur_index, _) in &turfs {
-						monstermos_fast_process(cur_index, &arena, &info, &mut graph);
+						monstermos_fast_process(cur_index, &arena, &mut info, &mut graph);
 					}
 					giver_turfs.clear();
 					taker_turfs.clear();
 
-					giver_turfs.par_extend(turfs.par_iter().filter(|(&cur_index, cur_mixture)| {
+					giver_turfs.extend(turfs.iter().filter(|(&cur_index, cur_mixture)| {
 						info.entry(cur_index).or_default().mole_delta > 0.0
 							&& cur_mixture.planetary_atmos.is_none()
 					}));
 
-					taker_turfs.par_extend(turfs.par_iter().filter(|(&cur_index, cur_mixture)| {
+					taker_turfs.extend(turfs.iter().filter(|(&cur_index, cur_mixture)| {
 						info.entry(cur_index).or_default().mole_delta <= 0.0
 							&& cur_mixture.planetary_atmos.is_none()
 					}));
@@ -830,9 +836,9 @@ pub(crate) fn equalize(
 				// alright this is the part that can become O(n^2).
 				if giver_turfs.len() < taker_turfs.len() {
 					// as an optimization, we choose one of two methods based on which list is smaller.
-					give_to_takers(&giver_turfs, &arena, &info, &mut graph);
+					give_to_takers(&giver_turfs, &arena, &mut info, &mut graph);
 				} else {
-					take_from_givers(&taker_turfs, &arena, &info, &mut graph);
+					take_from_givers(&taker_turfs, &arena, &mut info, &mut graph);
 				}
 				if planet_turfs.is_empty() {
 					turfs_processed.fetch_add(turfs.len(), std::sync::atomic::Ordering::Relaxed);
@@ -846,7 +852,7 @@ pub(crate) fn equalize(
 						&arena,
 						average_moles,
 						equalize_hard_turf_limit,
-						&info,
+						&mut info,
 						&mut graph,
 					);
 				}
