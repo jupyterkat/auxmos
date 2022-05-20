@@ -198,11 +198,7 @@ fn monstermos_fast_process(
 	eq_movement_graph: &mut DiGraphMap<Option<NodeIndex>, f32>,
 ) {
 	let mut cur_info = {
-		let maybe_cur_orig = info.get_mut(&cur_index);
-		if maybe_cur_orig.is_none() {
-			return;
-		}
-		let mut cur_info = maybe_cur_orig.unwrap();
+		let mut cur_info = info.get_mut(&cur_index).unwrap();
 		cur_info.fast_done = true;
 		*cur_info
 	};
@@ -245,11 +241,7 @@ fn give_to_takers(
 	let mut queue: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
 	for (&index, _) in giver_turfs {
 		let mut giver_info = {
-			let maybe_giver_orig = info.get_mut(&index);
-			if maybe_giver_orig.is_none() {
-				continue;
-			}
-			let mut giver_info = maybe_giver_orig.unwrap();
+			let giver_info = info.get_mut(&index).unwrap();
 			giver_info.curr_transfer_dir = None;
 			giver_info.curr_transfer_amount = 0.0;
 			*giver_info
@@ -326,11 +318,7 @@ fn take_from_givers(
 	let mut queue: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
 	for (&index, _) in taker_turfs {
 		let mut taker_info = {
-			let maybe_taker_orig = info.get_mut(&index);
-			if maybe_taker_orig.is_none() {
-				continue;
-			}
-			let mut taker_info = maybe_taker_orig.unwrap();
+			let taker_info = info.get_mut(&index).unwrap();
 			taker_info.curr_transfer_dir = None;
 			taker_info.curr_transfer_amount = 0.0;
 			*taker_info
@@ -819,16 +807,17 @@ pub(crate) fn equalize(
 					for (&cur_index, _) in &turfs {
 						monstermos_fast_process(cur_index, &arena, &mut info, &mut graph);
 					}
+
 					giver_turfs.clear();
 					taker_turfs.clear();
 
-					giver_turfs.extend(turfs.iter().filter(|(&cur_index, cur_mixture)| {
-						info.entry(cur_index).or_default().mole_delta > 0.0
+					giver_turfs.extend(turfs.iter().filter(|(cur_index, cur_mixture)| {
+						info.get(cur_index).unwrap().mole_delta > 0.0
 							&& cur_mixture.planetary_atmos.is_none()
 					}));
 
-					taker_turfs.extend(turfs.iter().filter(|(&cur_index, cur_mixture)| {
-						info.entry(cur_index).or_default().mole_delta <= 0.0
+					taker_turfs.extend(turfs.iter().filter(|(cur_index, cur_mixture)| {
+						info.get(cur_index).unwrap().mole_delta <= 0.0
 							&& cur_mixture.planetary_atmos.is_none()
 					}));
 				}
