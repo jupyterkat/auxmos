@@ -199,36 +199,15 @@ impl TurfGases {
 			for i in 1..=adjacent_list.len() {
 				let adj_val = adjacent_list.get(i)?;
 				//let adjacent_num = adjacent_list.get(&adj_val)?.as_number()? as u8;
-				//graph.add_edge(id, unsafe { adj_val.raw.data.id }, adjacent_num);
-
 				if let Some(&adj_index) = self.map.get(&unsafe { adj_val.raw.data.id }) {
 					self.graph.add_edge(this_index, adj_index, ());
 				}
 			}
-			/*
-			let old_edges = self
-				.graph
-				.edges(mix_info)
-				.map(|edgeref| (edgeref.id()))
-				.collect::<HashMap<_,_, FxBuildHasher>>();
-
-			for (adj_id, other) in old_edges.iter() {
-				if !new_list.contains(adj_id) {
-					self.graph.remove_edge(mix_info.mix, *other);
-				}
-			}
-			for idx in new_list {
-				if let Some(adj_info) = self.map.get(&idx) {
-					if !old_edges.contains_key(&idx) {
-						self.graph.add_edge(mix_info.mix, adj_info.mix, idx);
-					}
-				}
-			}
-			*/
 		};
 		Ok(())
 	}
 
+	//This isn't a useless collect(), we can't hold a mutable ref and an immutable ref at once on the graph
 	pub fn remove_adjacencies(&mut self, idx: TurfID) {
 		if let Some(index) = self.map.get(&idx) {
 			let edges = self
@@ -313,8 +292,6 @@ impl TurfGases {
 			.filter(|tmix| tmix.enabled())
 			.map(|tmix| &tmix.id)
 	}
-	*/
-	/*
 	pub fn get_mixture(&self, idx: TurfID) -> Option<TurfMixture> {
 		self.mixtures.read().get(&idx).cloned()
 	}
