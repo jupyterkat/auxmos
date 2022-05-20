@@ -31,7 +31,7 @@ use std::mem::drop;
 use crate::callbacks::aux_callbacks_sender;
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use petgraph::graphmap::DiGraphMap;
+use petgraph::{graph::NodeIndex, stable_graph::StableDiGraph, visit::EdgeRef};
 
 const NORTH: u8 = 1;
 const SOUTH: u8 = 2;
@@ -66,6 +66,7 @@ type TurfID = u32;
 #[derive(Clone, Copy, Default, Hash, Eq, PartialEq)]
 struct TurfMixture {
 	pub mix: usize,
+	pub id: TurfID,
 	pub flags: u8,
 	pub planetary_atmos: Option<u32>,
 }
@@ -75,44 +76,6 @@ impl TurfMixture {
 	pub fn enabled(&self) -> bool {
 		let simul_flags = self.flags & SIMULATION_FLAGS;
 		simul_flags & SIMULATION_DISABLED == 0 && simul_flags & SIMULATION_ANY != 0
-	}
-	pub fn adjacent_mixes<'a>(
-		&self,
-		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
-		arena: &'a RwLockReadGuard<TurfGases>,
-	) -> impl Iterator<Item = &'a parking_lot::RwLock<Mixture>> {
-		arena
-			.adjacencies
-			.neighbors(self.mix)
-			.filter_map(move |idx| all_mixtures.get(idx))
-	}
-	pub fn adjacent_mixes_with_adj_info<'a>(
-		&self,
-		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
-		arena: &'a RwLockReadGuard<TurfGases>,
-	) -> impl Iterator<Item = (TurfID, &'a parking_lot::RwLock<Mixture>)> {
-		arena
-			.adjacencies
-			.edges(self.mix)
-			.filter_map(move |(_, idx, &turfid)| all_mixtures.get(idx).map(|mix| (turfid, mix)))
-	}
-	fn adjacents<'a>(
-		&self,
-		arena: &'a RwLockReadGuard<TurfGases>,
-	) -> impl Iterator<Item = &'a TurfID> {
-		arena.adjacencies.edges(self.mix).map(|(_, _, adj)| adj)
-	}
-
-	fn adjacents_enabled<'a>(
-		&self,
-		arena: &'a RwLockReadGuard<TurfGases>,
-	) -> impl Iterator<Item = &'a TurfID> {
-		arena.adjacencies.edges(self.mix).filter_map(|(_, _, adj)| {
-			arena
-				.mixtures
-				.get(adj)
-				.and_then(|mx| mx.enabled().then(|| adj))
-		})
 	}
 	pub fn is_immutable(&self) -> bool {
 		GasArena::with_all_mixtures(|all_mixtures| {
@@ -199,76 +162,158 @@ struct ThermalInfo {
 }
 #[derive(Default)]
 struct TurfGases {
-	adjacencies: DiGraphMap<usize, TurfID>,
-	mixtures: HashMap<TurfID, TurfMixture, FxBuildHasher>,
+	graph: StableDiGraph<TurfMixture, ()>,
+	map: HashMap<TurfID, NodeIndex, FxBuildHasher>,
 }
 
 impl TurfGases {
 	pub fn remove_turf(&mut self, idx: TurfID) {
-		if let Some(tmix) = self.mixtures.remove(&idx) {
-			self.adjacencies.remove_node(tmix.mix);
+		if let Some(tmix) = self.map.remove(&idx) {
+			self.graph.remove_node(tmix);
 		}
 	}
 
 	pub fn insert_turf(&mut self, idx: TurfID, tmix: TurfMixture) {
-		self.mixtures.insert(idx, tmix);
+		self.map.insert(idx, self.graph.add_node(tmix));
 	}
 
 	pub fn disable_turf(&mut self, idx: TurfID) {
-		self.mixtures.entry(idx).and_modify(|tmix| {
-			tmix.flags |= SIMULATION_DISABLED;
-			//self.adjacencies.write().remove_node(tmix.mix);
-		});
+		if let Some(&index) = self.map.get(&idx) {
+			if let Some(node) = self.graph.node_weight_mut(index) {
+				node.flags |= SIMULATION_DISABLED
+			}
+		}
 	}
 
 	pub fn enable_turf(&mut self, idx: TurfID) {
-		self.mixtures.entry(idx).and_modify(|tmix| {
-			tmix.flags &= !SIMULATION_DISABLED;
-		});
+		if let Some(&index) = self.map.get(&idx) {
+			if let Some(node) = self.graph.node_weight_mut(index) {
+				node.flags &= !SIMULATION_DISABLED
+			}
+		}
 	}
 
 	pub fn update_adjacencies(&mut self, idx: TurfID, adjacent_list: List) -> Result<(), Runtime> {
-		if let Some(mix_info) = self.mixtures.get(&idx) {
-			use std::collections::HashSet;
-			let mut new_list: HashSet<TurfID, FxBuildHasher> = Default::default();
+		if let Some(&this_index) = self.map.get(&idx) {
+			self.remove_adjacencies(idx);
 			for i in 1..=adjacent_list.len() {
 				let adj_val = adjacent_list.get(i)?;
 				//let adjacent_num = adjacent_list.get(&adj_val)?.as_number()? as u8;
 				//graph.add_edge(id, unsafe { adj_val.raw.data.id }, adjacent_num);
-				new_list.insert(unsafe { adj_val.raw.data.id });
+
+				if let Some(&adj_index) = self.map.get(&unsafe { adj_val.raw.data.id }) {
+					self.graph.add_edge(this_index, adj_index, ());
+				}
 			}
+			/*
 			let old_edges = self
-				.adjacencies
-				.edges(mix_info.mix)
-				.map(|(_, t2, id)| (*id, t2))
-				.collect::<HashMap<_, _, FxBuildHasher>>();
+				.graph
+				.edges(mix_info)
+				.map(|edgeref| (edgeref.id()))
+				.collect::<HashMap<_,_, FxBuildHasher>>();
 
 			for (adj_id, other) in old_edges.iter() {
 				if !new_list.contains(adj_id) {
-					self.adjacencies.remove_edge(mix_info.mix, *other);
+					self.graph.remove_edge(mix_info.mix, *other);
 				}
 			}
 			for idx in new_list {
-				if let Some(adj_info) = self.mixtures.get(&idx) {
+				if let Some(adj_info) = self.map.get(&idx) {
 					if !old_edges.contains_key(&idx) {
-						self.adjacencies.add_edge(mix_info.mix, adj_info.mix, idx);
+						self.graph.add_edge(mix_info.mix, adj_info.mix, idx);
 					}
 				}
 			}
+			*/
 		};
 		Ok(())
 	}
 
 	pub fn remove_adjacencies(&mut self, idx: TurfID) {
-		self.mixtures
-			.get(&idx)
-			.map(|thin| self.adjacencies.remove_node(thin.mix));
+		if let Some(index) = self.map.get(&idx) {
+			let edges = self
+				.graph
+				.edges(*index)
+				.map(|edgeref| edgeref.id())
+				.collect::<Vec<_>>();
+			edges.into_iter().for_each(|edgeindex| {
+				self.graph.remove_edge(edgeindex);
+			});
+		}
 	}
 
-	pub fn get(&self, idx: &TurfID) -> Option<&TurfMixture> {
-		self.mixtures.get(idx)
+	pub fn get_from_turfid(&self, idx: &TurfID) -> Option<&TurfMixture> {
+		self.map
+			.get(idx)
+			.and_then(|index| self.graph.node_weight(*index))
 	}
 
+	pub fn get(&self, idx: NodeIndex) -> Option<&TurfMixture> {
+		self.graph.node_weight(idx)
+	}
+
+	pub fn adjacent_node_ids<'a>(
+		&'a self,
+		index: NodeIndex,
+	) -> impl Iterator<Item = NodeIndex> + '_ {
+		self.graph.neighbors(index)
+	}
+
+	pub fn adjacent_node_ids_enabled<'a>(
+		&'a self,
+		index: NodeIndex,
+	) -> impl Iterator<Item = NodeIndex> + '_ {
+		self.graph.neighbors(index).filter(|&adj_index| {
+			self.graph
+				.node_weight(adj_index)
+				.map_or(false, |mix| mix.enabled())
+		})
+	}
+
+	pub fn adjacent_mixes<'a>(
+		&'a self,
+		index: NodeIndex,
+		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
+	) -> impl Iterator<Item = &'a parking_lot::RwLock<Mixture>> {
+		self.graph
+			.neighbors(index)
+			.filter_map(|neighbor| self.graph.node_weight(neighbor))
+			.filter_map(move |idx| all_mixtures.get(idx.mix))
+	}
+
+	pub fn adjacent_mixes_with_adj_ids<'a>(
+		&'a self,
+		index: NodeIndex,
+		all_mixtures: &'a [parking_lot::RwLock<Mixture>],
+	) -> impl Iterator<Item = (&'a TurfID, &'a parking_lot::RwLock<Mixture>)> {
+		self.graph
+			.neighbors(index)
+			.filter_map(|neighbor| self.graph.node_weight(neighbor))
+			.filter_map(move |idx| Some((&idx.id, all_mixtures.get(idx.mix)?)))
+	}
+
+	pub fn adjacent_infos(&self, index: NodeIndex) -> impl Iterator<Item = &TurfMixture> {
+		self.graph
+			.neighbors(index)
+			.filter_map(|neighbor| self.graph.node_weight(neighbor))
+	}
+
+	/*
+	pub fn adjacent_ids<'a>(&'a self, idx: TurfID) -> impl Iterator<Item = &'a TurfID> {
+		self.graph
+			.neighbors(*self.map.get(&idx).unwrap())
+			.filter_map(|index| self.graph.node_weight(index))
+			.map(|tmix| &tmix.id)
+	}
+
+	pub fn adjacents_enabled<'a>(&'a self, idx: TurfID) -> impl Iterator<Item = &'a TurfID> {
+		self.graph
+			.neighbors(*self.map.get(&idx).unwrap())
+			.filter_map(|index| self.graph.node_weight(index))
+			.filter(|tmix| tmix.enabled())
+			.map(|tmix| &tmix.id)
+	}
+	*/
 	/*
 	pub fn get_mixture(&self, idx: TurfID) -> Option<TurfMixture> {
 		self.mixtures.read().get(&idx).cloned()
@@ -356,6 +401,7 @@ fn _hook_register_turf() {
 				})?
 				.to_bits() as usize;
 			to_insert.flags = simulation_level as u8;
+			to_insert.id = id;
 
 			if let Ok(is_planet) = src.get_number(byond_string!("planetary_atmos")) {
 				if is_planet != 0.0 {

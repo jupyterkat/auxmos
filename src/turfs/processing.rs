@@ -322,17 +322,18 @@ fn _process_turf_start() -> Result<(), String> {
 
 // Compares with neighbors, returning early if any of them are valid.
 fn should_process(
-	m: &TurfMixture,
+	index: NodeIndex,
+	mixture: &TurfMixture,
 	all_mixtures: &[RwLock<Mixture>],
 	arena: &RwLockReadGuard<TurfGases>,
 ) -> bool {
-	m.adjacents(arena).next().is_some()
-		&& m.enabled()
+	arena.adjacent_infos(index).next().is_some()
+		&& mixture.enabled()
 		&& all_mixtures
-			.get(m.mix)
+			.get(mixture.mix)
 			.and_then(RwLock::try_read)
 			.map_or(false, |gas| {
-				for entry in m.adjacent_mixes(all_mixtures, arena) {
+				for entry in arena.adjacent_mixes(index, all_mixtures) {
 					if let Some(mix) = entry.try_read() {
 						if gas.temperature_compare(&mix)
 							|| gas.compare_with(&mix, MINIMUM_MOLES_DELTA_TO_MOVE)
@@ -343,7 +344,8 @@ fn should_process(
 						return false;
 					}
 				}
-				m.planetary_atmos
+				mixture
+					.planetary_atmos
 					.and_then(|id| planetary_atmos().try_get(&id).try_unwrap())
 					.map_or(false, |planet_atmos_entry| {
 						let planet_atmos = planet_atmos_entry.value();
@@ -357,17 +359,11 @@ fn should_process(
 // Clippy go away, this type is only used once
 #[allow(clippy::type_complexity)]
 fn process_cell(
-	i: &TurfID,
-	m: &TurfMixture,
+	index: NodeIndex,
+	mixture: TurfMixture,
 	all_mixtures: &[RwLock<Mixture>],
 	arena: &RwLockReadGuard<TurfGases>,
-) -> Option<(
-	TurfID,
-	TurfMixture,
-	Mixture,
-	TinyVec<[(TurfID, f32); 6]>,
-	i32,
-)> {
+) -> Option<(NodeIndex, Mixture, TinyVec<[(TurfID, f32); 6]>, i32)> {
 	let mut adj_amount = 0;
 	/*
 		Getting write locks is potential danger zone,
@@ -386,7 +382,7 @@ fn process_cell(
 		due to the pressure gradient.
 		Technically that's ρν², but, like, video games.
 	*/
-	for (loc, entry) in m.adjacent_mixes_with_adj_info(all_mixtures, arena) {
+	for (&loc, entry) in arena.adjacent_mixes_with_adj_ids(index, all_mixtures) {
 		match entry.try_read() {
 			Some(mix) => {
 				end_gas.merge(&mix);
@@ -397,7 +393,7 @@ fn process_cell(
 		}
 	}
 
-	if let Some(planet_atmos_entry) = m
+	if let Some(planet_atmos_entry) = mixture
 		.planetary_atmos
 		.and_then(|id| planetary_atmos().try_get(&id).try_unwrap())
 	{
@@ -421,19 +417,19 @@ fn process_cell(
 		but I digress.)
 	*/
 	end_gas.multiply(GAS_DIFFUSION_CONSTANT);
-	Some((*i, *m, end_gas, pressure_diffs, adj_amount))
+	Some((index, end_gas, pressure_diffs, adj_amount))
 }
 
 // Solving the heat equation using a Finite Difference Method, an iterative stencil loop.
-fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>) {
+fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<NodeIndex>, Vec<NodeIndex>) {
 	/*
 		This is the replacement system for LINDA. LINDA requires a lot of bookkeeping,
 		which, when coefficient-wise operations are this fast, is all just unnecessary overhead.
 		This is a much simpler FDM system, basically like LINDA but without its most important feature,
 		sleeping turfs, which is why I've renamed it to fdm.
 	*/
-	let mut low_pressure_turfs: Vec<TurfID> = Vec::new();
-	let mut high_pressure_turfs: Vec<TurfID> = Vec::new();
+	let mut low_pressure_turfs: Vec<NodeIndex> = Vec::new();
+	let mut high_pressure_turfs: Vec<NodeIndex> = Vec::new();
 	let mut cur_count = 1;
 	with_turf_gases_read(|thin| {
 		loop {
@@ -442,7 +438,8 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 			}
 			GasArena::with_all_mixtures(|all_mixtures| {
 				let turfs_to_save = thin
-					.mixtures
+					.graph
+					.raw_nodes()
 					/*
 						This uses DashMap's rayon feature to parallelize the process.
 						The speedup gained from this is actually linear
@@ -453,8 +450,12 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 						but it's already blazingly fast on my i7, so it should be fine.
 					*/
 					.par_iter()
-					.filter(|(_, m)| should_process(m, all_mixtures, &thin))
-					.filter_map(|(i, m)| process_cell(i, m, all_mixtures, &thin))
+					.enumerate()
+					.filter_map(|(index, node)| Some((NodeIndex::from(index as u32), node.weight?)))
+					.filter(|(index, mixture)| should_process(*index, mixture, all_mixtures, &thin))
+					.filter_map(|(index, mixture)| {
+						process_cell(index, mixture, all_mixtures, &thin)
+					})
 					.collect::<Vec<_>>();
 				/*
 					For the optimization-heads reading this: this is not an unnecessary collect().
@@ -466,7 +467,8 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 				*/
 				let (low_pressure, high_pressure): (Vec<_>, Vec<_>) = turfs_to_save
 					.into_par_iter()
-					.filter_map(|(i, m, end_gas, mut pressure_diffs, adj_amount)| {
+					.filter_map(|(i, end_gas, mut pressure_diffs, adj_amount)| {
+						let m = thin.get(i).unwrap();
 						all_mixtures.get(m.mix).map(|entry| {
 							let mut max_diff = 0.0_f32;
 							let moved_pressure = {
@@ -516,31 +518,34 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 							let sender = byond_callback_sender();
 							let these_pressure_deltas = temp_value.to_vec();
 							drop(sender.try_send(Box::new(move || {
-								for (turf_id, pressure_diffs, _) in these_pressure_deltas
-									.clone()
-									.into_iter()
-									.filter(|(id, _, _)| id != &0)
-								{
-									let turf = unsafe { Value::turf_by_id_unchecked(turf_id) };
-									for &(id, diff) in &pressure_diffs {
-										if id != 0 {
-											let enemy_tile =
-												unsafe { Value::turf_by_id_unchecked(id) };
-											if diff > 5.0 {
-												turf.call(
-													"consider_pressure_difference",
-													&[&enemy_tile, &Value::from(diff)],
-												)?;
-											} else if diff < -5.0 {
-												enemy_tile.call(
-													"consider_pressure_difference",
-													&[&turf.clone(), &Value::from(-diff)],
-												)?;
+								with_turf_gases_read(|arena| {
+									for (turf_id, pressure_diffs) in these_pressure_deltas
+										.clone()
+										.into_iter()
+										.filter_map(|(nodeindex, diffs, _)| {
+											Some((arena.get(nodeindex)?.id, diffs))
+										}) {
+										let turf = unsafe { Value::turf_by_id_unchecked(turf_id) };
+										for &(id, diff) in &pressure_diffs {
+											if id != 0 {
+												let enemy_tile =
+													unsafe { Value::turf_by_id_unchecked(id) };
+												if diff > 5.0 {
+													turf.call(
+														"consider_pressure_difference",
+														&[&enemy_tile, &Value::from(diff)],
+													)?;
+												} else if diff < -5.0 {
+													enemy_tile.call(
+														"consider_pressure_difference",
+														&[&turf.clone(), &Value::from(-diff)],
+													)?;
+												}
 											}
 										}
 									}
-								}
-								Ok(Value::null())
+									Ok(Value::null())
+								})
 							})));
 						});
 				}
@@ -554,35 +559,36 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<TurfID>, Vec<TurfID>)
 }
 
 // Finds small differences in turf pressures and equalizes them.
-fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<TurfID>) -> usize {
-	let mut found_turfs: HashSet<TurfID, FxBuildHasher> = Default::default();
-	with_turf_gases_read(|thin| {
+fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<NodeIndex>) -> usize {
+	let mut found_turfs: HashSet<NodeIndex, FxBuildHasher> = Default::default();
+	with_turf_gases_read(|arena| {
 		GasArena::with_all_mixtures(|all_mixtures| {
 			for &initial_turf in low_pressure_turfs {
 				if found_turfs.contains(&initial_turf) {
 					continue;
 				}
 				let initial_mix_ref = {
-					let maybe_initial_mix_ref = thin.mixtures.get(&initial_turf);
+					let maybe_initial_mix_ref = arena.get(initial_turf);
 					if maybe_initial_mix_ref.is_none() {
 						continue;
 					}
 					*maybe_initial_mix_ref.unwrap()
 				};
-				let mut border_turfs: VecDeque<TurfMixture> = VecDeque::with_capacity(40);
+				let mut border_turfs: VecDeque<NodeIndex> = VecDeque::with_capacity(40);
 				let mut turfs: Vec<TurfMixture> = Vec::with_capacity(200);
 				let mut min_pressure = initial_mix_ref.return_pressure();
 				let mut max_pressure = min_pressure;
 				let mut fully_mixed = Mixture::new();
-				border_turfs.push_back(initial_mix_ref);
+				border_turfs.push_back(initial_turf);
 				found_turfs.insert(initial_turf);
 
 				loop {
 					if turfs.len() >= 2500 {
 						break;
 					}
-					if let Some(turf) = border_turfs.pop_front() {
-						if let Some(lock) = all_mixtures.get(turf.mix) {
+					if let Some(idx) = border_turfs.pop_front() {
+						let tmix = *arena.get(idx).unwrap();
+						if let Some(lock) = all_mixtures.get(tmix.mix) {
 							let mix = lock.read();
 							let pressure = mix.return_pressure();
 							let this_max = max_pressure.max(pressure);
@@ -592,18 +598,16 @@ fn excited_group_processing(pressure_goal: f32, low_pressure_turfs: &Vec<TurfID>
 							}
 							min_pressure = this_min;
 							max_pressure = this_max;
-							turfs.push(turf);
+							turfs.push(tmix);
 							fully_mixed.merge(&mix);
 							fully_mixed.volume += mix.volume;
-							for &loc in turf.adjacents(&thin) {
+							for loc in arena.adjacent_node_ids(idx) {
 								if found_turfs.contains(&loc) {
 									continue;
 								}
 								found_turfs.insert(loc);
-								if let Some(border_mix) =
-									thin.mixtures.get(&loc).filter(|b| b.enabled())
-								{
-									border_turfs.push_back(*border_mix);
+								if arena.get(loc).filter(|b| b.enabled()).is_some() {
+									border_turfs.push_back(loc);
 								}
 							}
 						}
@@ -654,27 +658,28 @@ static mut VISUALS_CACHE: Option<std::collections::HashMap<usize, u64, FxBuildHa
 
 // Checks if the gas can react or can update visuals, returns None if not.
 fn post_process_cell(
-	i: &TurfID,
-	m: &TurfMixture,
+	mixture: &TurfMixture,
 	vis: &[Option<f32>],
 	all_mixtures: &[RwLock<Mixture>],
 	vis_cache: &std::collections::HashMap<usize, u64, FxBuildHasher>,
 	updates: &flume::Sender<(usize, u64)>,
 ) -> Option<(TurfID, bool, bool)> {
 	all_mixtures
-		.get(m.mix)
+		.get(mixture.mix)
 		.and_then(RwLock::try_read)
 		.and_then(|gas| {
-			let should_update_visuals =
-				match gas.vis_hash_changed(vis, vis_cache.get(&m.mix).copied().unwrap_or(0)) {
-					Some(hash) => {
-						let _ = updates.send((m.mix, hash));
-						true
-					}
-					None => false,
-				};
+			let should_update_visuals = match gas
+				.vis_hash_changed(vis, vis_cache.get(&mixture.mix).copied().unwrap_or(0))
+			{
+				Some(hash) => {
+					let _ = updates.send((mixture.mix, hash));
+					true
+				}
+				None => false,
+			};
 			let reactable = gas.can_react();
-			(should_update_visuals || reactable).then(|| (*i, should_update_visuals, reactable))
+			(should_update_visuals || reactable)
+				.then(|| (mixture.id, should_update_visuals, reactable))
 		})
 }
 
@@ -697,20 +702,27 @@ fn post_process() {
 			.get_or_insert_with(|| std::collections::HashMap::with_hasher(FxBuildHasher::default()))
 	};
 	let processables = {
-		with_turf_gases_read(|thin| {
-			thin.mixtures
+		with_turf_gases_read(|arena| {
+			arena
+				.graph
+				.raw_nodes()
 				.par_iter()
-				.filter_map(|(i, m)| {
-					m.enabled()
+				.filter_map(|node| node.weight)
+				.filter_map(|mixture| {
+					mixture
+						.enabled()
 						.then(|| {
 							GasArena::with_all_mixtures(|all_mixtures| {
 								if should_check_planet_turfs {
 									let planetary_atmos = planetary_atmos();
-									remove_trace_planet_gases(m, planetary_atmos, all_mixtures);
+									remove_trace_planet_gases(
+										&mixture,
+										planetary_atmos,
+										all_mixtures,
+									);
 								}
 								post_process_cell(
-									i,
-									m,
+									&mixture,
 									&vis,
 									all_mixtures,
 									vis_cache,
@@ -845,8 +857,7 @@ fn _process_heat_start() -> Result<(), String> {
 						.then(|| {
 							let mut heat_delta = 0.0;
 							let is_temp_delta_with_air = with_turf_gases_read(|thin| {
-								thin.mixtures
-									.get(&i)
+								thin.get_from_turfid(&i)
 									.filter(|m| m.enabled())
 									.and_then(|m| {
 										GasArena::with_all_mixtures(|all_mixtures| {
@@ -903,8 +914,7 @@ fn _process_heat_start() -> Result<(), String> {
 					}
 					let t: &mut ThermalInfo = &mut maybe_t.unwrap();
 					t.temperature = with_turf_gases_read(|thin| {
-						thin.mixtures
-							.get(&i)
+						thin.get_from_turfid(&i)
 							.filter(|m| m.enabled())
 							.and_then(|m| {
 								GasArena::with_all_mixtures(|all_mixtures| {
