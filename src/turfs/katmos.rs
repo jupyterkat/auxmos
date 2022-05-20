@@ -131,6 +131,7 @@ fn finalize_eq(
 			}
 		}
 	}
+	let cur_turf_id = arena.get(index).unwrap().id;
 	for adj_index in arena.adjacent_node_ids(index) {
 		let amount = *transfer_dirs.get(&Some(adj_index)).unwrap_or(&0.0);
 		if amount > 0.0 {
@@ -151,26 +152,19 @@ fn finalize_eq(
 						},
 					));
 				}
+				let adj_turf_id = adj_tmix.id;
 				drop(sender.try_send(Box::new(move || {
-					with_turf_gases_read(|arena| {
-						if let Some(cur_mixture) = arena.get(index) {
-							if let Some(adj_mixture) = arena.get(index) {
-								let real_amount = Value::from(amount);
-								let turf = unsafe { Value::turf_by_id_unchecked(cur_mixture.id) };
-								let other_turf =
-									unsafe { Value::turf_by_id_unchecked(adj_mixture.id) };
-								if let Err(e) = turf.call(
-									"consider_pressure_difference",
-									&[&other_turf, &real_amount],
-								) {
-									Proc::find(byond_string!("/proc/stack_trace"))
-										.ok_or_else(|| runtime!("Couldn't find stack_trace!"))?
-										.call(&[&Value::from_string(e.message.as_str())?])?;
-								}
-							}
-						}
-						Ok(Value::null())
-					})
+					let real_amount = Value::from(amount);
+					let turf = unsafe { Value::turf_by_id_unchecked(cur_turf_id) };
+					let other_turf = unsafe { Value::turf_by_id_unchecked(adj_turf_id) };
+					if let Err(e) =
+						turf.call("consider_pressure_difference", &[&other_turf, &real_amount])
+					{
+						Proc::find(byond_string!("/proc/stack_trace"))
+							.ok_or_else(|| runtime!("Couldn't find stack_trace!"))?
+							.call(&[&Value::from_string(e.message.as_str())?])?;
+					}
+					Ok(Value::null())
 				})));
 			}
 		}
@@ -706,19 +700,18 @@ fn process_planet_turfs(
 				.and_modify(|entry| *entry = MonstermosInfo::default());
 			continue;
 		}
-
+		let cur_mixture_id = maybe_m.unwrap().id;
 		for adj_index in arena.adjacent_node_ids(cur_index) {
 			if let Some(mut adj_info) = info.get_mut(&adj_index) {
+				let adj_mixture_id = arena.get(adj_index).unwrap().id;
 				if queue_idx < equalize_hard_turf_limit {
 					drop(sender.try_send(Box::new(move || {
-						with_turf_gases_read(|arena| {
-							if let Some(cur_mixture) = arena.get(cur_index) {
-								let this_turf =
-									unsafe { Value::turf_by_id_unchecked(cur_mixture.id) };
-								this_turf.call("consider_firelocks", &[])?;
-							}
-							Ok(Value::null())
-						})
+						let this_turf = unsafe { Value::turf_by_id_unchecked(cur_mixture_id) };
+						this_turf.call(
+							"consider_firelocks",
+							&[&unsafe { Value::turf_by_id_unchecked(adj_mixture_id) }],
+						)?;
+						Ok(Value::null())
 					})));
 				}
 				if let Some(adj_mixture) = arena
