@@ -397,73 +397,75 @@ fn take_from_givers(
 	}
 }
 
+#[inline(never)]
 fn explosively_depressurize(initial_index: NodeIndex, equalize_hard_turf_limit: usize) -> DMResult {
-	let mut info: HashMap<NodeIndex, Cell<ReducedInfo>, FxBuildHasher> = Default::default();
-	let mut turfs: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
-	let mut progression_order: IndexSet<MixWithID, RandomState> = Default::default();
-	let mut space_turfs: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
-	turfs.insert(initial_index);
-	let mut warned_about_planet_atmos = false;
-	let mut cur_queue_idx = 0;
-
 	//1st floodfill
-	with_turf_gases_read(|arena| -> Result<(), Runtime> {
-		while cur_queue_idx < turfs.len() {
-			let cur_index = turfs[cur_queue_idx];
-			cur_queue_idx += 1;
-			let cur_mixture = {
-				let maybe = arena.get(cur_index);
-				if maybe.is_none() {
+	let (space_turfs, warned_about_planet_atmos) = with_turf_gases_read(
+		|arena| -> Result<(IndexSet<NodeIndex, FxBuildHasher>, bool), Runtime> {
+			let mut cur_queue_idx = 0;
+			let mut warned_about_planet_atmos = false;
+			let mut space_turfs: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
+			let mut turfs: IndexSet<NodeIndex, FxBuildHasher> = Default::default();
+			turfs.insert(initial_index);
+			while cur_queue_idx < turfs.len() {
+				let cur_index = turfs[cur_queue_idx];
+				cur_queue_idx += 1;
+				let cur_mixture = {
+					let maybe = arena.get(cur_index);
+					if maybe.is_none() {
+						continue;
+					}
+					*maybe.unwrap()
+				};
+				if cur_mixture.planetary_atmos.is_some() {
+					warned_about_planet_atmos = true;
 					continue;
 				}
-				*maybe.unwrap()
-			};
-			if cur_mixture.planetary_atmos.is_some() {
-				warned_about_planet_atmos = true;
-				continue;
-			}
-			if cur_mixture.is_immutable() {
-				if space_turfs.insert(cur_index) {
-					unsafe { Value::turf_by_id_unchecked(cur_mixture.id) }
-						.set(byond_string!("pressure_specific_target"), &unsafe {
-							Value::turf_by_id_unchecked(cur_mixture.id)
-						})?;
-				}
-			} else {
-				if cur_queue_idx > equalize_hard_turf_limit {
-					continue;
-				}
-				for adj_index in arena.adjacent_node_ids(cur_index) {
-					if let Some(adj_mixture) = arena.get(adj_index) {
-						if turfs.insert(adj_index) {
-							unsafe { Value::turf_by_id_unchecked(cur_mixture.id) }.call(
-								"consider_firelocks",
-								&[&unsafe { Value::turf_by_id_unchecked(adj_mixture.id) }],
-							)?;
+				if cur_mixture.is_immutable() {
+					if space_turfs.insert(cur_index) {
+						unsafe { Value::turf_by_id_unchecked(cur_mixture.id) }
+							.set(byond_string!("pressure_specific_target"), &unsafe {
+								Value::turf_by_id_unchecked(cur_mixture.id)
+							})?;
+					}
+				} else {
+					if cur_queue_idx > equalize_hard_turf_limit {
+						continue;
+					}
+					for adj_index in arena.adjacent_node_ids(cur_index) {
+						if let Some(adj_mixture) = arena.get(adj_index) {
+							if turfs.insert(adj_index) {
+								unsafe { Value::turf_by_id_unchecked(cur_mixture.id) }.call(
+									"consider_firelocks",
+									&[&unsafe { Value::turf_by_id_unchecked(adj_mixture.id) }],
+								)?;
+							}
 						}
 					}
 				}
+				if warned_about_planet_atmos {
+					break;
+				}
 			}
-			if warned_about_planet_atmos {
-				break;
-			}
-		}
-		Ok(())
-	})?;
+			Ok((space_turfs, warned_about_planet_atmos))
+		},
+	)?;
 
 	if warned_about_planet_atmos {
 		return Ok(Value::null()); // planet atmos > space
+	}
+
+	if space_turfs.is_empty() {
+		return Ok(Value::null());
 	}
 
 	//actually update the damn arena to register the firelocks closing
 	process_aux_callbacks(crate::callbacks::TURFS);
 	process_aux_callbacks(crate::callbacks::ADJACENCIES);
 
-	if space_turfs.is_empty() {
-		return Ok(Value::null());
-	}
-
-	with_turf_gases_read(|arena| {
+	with_turf_gases_read(move |arena| {
+		let mut info: HashMap<NodeIndex, Cell<ReducedInfo>, FxBuildHasher> = Default::default();
+		let mut progression_order: IndexSet<MixWithID, RandomState> = Default::default();
 		for &cur_index in space_turfs.iter() {
 			let maybe_turf = arena.get(cur_index);
 			if maybe_turf.is_none() {
@@ -472,13 +474,11 @@ fn explosively_depressurize(initial_index: NodeIndex, equalize_hard_turf_limit: 
 			let cur_mixture = maybe_turf.unwrap();
 			progression_order.insert((cur_index, *cur_mixture));
 		}
-	});
 
-	cur_queue_idx = 0;
-	let mut space_turf_len = 0;
-	let mut total_moles = 0.0;
-	//2nd floodfill
-	with_turf_gases_read(|arena| -> Result<(), Runtime> {
+		let mut space_turf_len = 0;
+		let mut total_moles = 0.0;
+		let mut cur_queue_idx = 0;
+		//2nd floodfill
 		while cur_queue_idx < progression_order.len() {
 			let (cur_index, cur_mixture) = progression_order[cur_queue_idx];
 			cur_queue_idx += 1;
@@ -509,26 +509,23 @@ fn explosively_depressurize(initial_index: NodeIndex, equalize_hard_turf_limit: 
 				}
 			}
 		}
-		Ok(())
-	})?;
 
-	let _average_moles = total_moles / (progression_order.len() - space_turf_len) as f32;
+		let _average_moles = total_moles / (progression_order.len() - space_turf_len) as f32;
 
-	let hpd = auxtools::Value::globals()
-		.get(byond_string!("SSair"))?
-		.get_list(byond_string!("high_pressure_delta"))
-		.map_err(|_| {
-			runtime!(
-				"Attempt to interpret non-list value as list {} {}:{}",
-				std::file!(),
-				std::line!(),
-				std::column!()
-			)
-		})?;
+		let hpd = auxtools::Value::globals()
+			.get(byond_string!("SSair"))?
+			.get_list(byond_string!("high_pressure_delta"))
+			.map_err(|_| {
+				runtime!(
+					"Attempt to interpret non-list value as list {} {}:{}",
+					std::file!(),
+					std::line!(),
+					std::column!()
+				)
+			})?;
 
-	let get_dir = Proc::find(byond_string!("/proc/get_dir_multiz")).unwrap();
+		let get_dir = Proc::find(byond_string!("/proc/get_dir_multiz")).unwrap();
 
-	with_turf_gases_read(|arena| -> Result<(), Runtime> {
 		for (cur_index, cur_mixture) in progression_order.iter().rev() {
 			let cur_orig = info.entry(*cur_index).or_default();
 			let mut cur_info = cur_orig.get();
