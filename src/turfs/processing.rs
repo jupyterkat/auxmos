@@ -843,23 +843,24 @@ fn _process_heat_start() -> Result<(), String> {
 			let sender = byond_callback_sender();
 			let emissivity_constant: f64 = STEFAN_BOLTZMANN_CONSTANT * info.time_delta;
 			let radiation_from_space_tick: f64 = RADIATION_FROM_SPACE * info.time_delta;
-			let temps_to_update = turf_temperatures()
-				.par_iter()
-				.map(|entry| {
-					let (&i, &t) = entry.pair();
-					(i, t)
-				})
-				.filter_map(|(i, t)| {
-					let adj = t.adjacency;
-					/*
-						If it has no thermal conductivity or low thermal capacity,
-						then it's not gonna interact, or at least shouldn't.
-					*/
-					(t.thermal_conductivity > 0.0 && t.heat_capacity > 0.0 && adj > 0)
-						.then(|| {
-							let mut heat_delta = 0.0;
-							let is_temp_delta_with_air = with_turf_gases_read(|thin| {
-								thin.get_from_turfid(&i)
+			with_turf_gases_read(|arena| {
+				let temps_to_update = turf_temperatures()
+					.par_iter()
+					.map(|entry| {
+						let (&i, &t) = entry.pair();
+						(i, t)
+					})
+					.filter_map(|(i, t)| {
+						let adj = t.adjacency;
+						/*
+							If it has no thermal conductivity or low thermal capacity,
+							then it's not gonna interact, or at least shouldn't.
+						*/
+						(t.thermal_conductivity > 0.0 && t.heat_capacity > 0.0 && adj > 0)
+							.then(|| {
+								let mut heat_delta = 0.0;
+								let is_temp_delta_with_air = arena
+									.get_from_turfid(&i)
 									.filter(|m| m.enabled())
 									.and_then(|m| {
 										GasArena::with_all_mixtures(|all_mixtures| {
@@ -868,55 +869,56 @@ fn _process_heat_start() -> Result<(), String> {
 											)
 										})
 									})
-									.unwrap_or(false)
-							});
-							for (_, loc) in adjacent_tile_ids(adj, i, info.max_x, info.max_y) {
-								heat_delta += turf_temperatures()
-									.try_get(&loc)
-									.try_unwrap()
-									.map_or(0.0, |other| {
-										/*
-											The horrible line below is essentially
-											sharing between solids--making it the minimum of both
-											conductivities makes this consistent, funnily enough.
-										*/
-										t.thermal_conductivity.min(other.thermal_conductivity)
-											* (other.temperature - t.temperature) * (t.heat_capacity
-											* other.heat_capacity
-											/ (t.heat_capacity + other.heat_capacity))
-									});
-							}
-							if t.adjacent_to_space {
-								/*
-									Straight up the standard blackbody radiation
-									equation. All these are f64s because
-									f32::MAX^4 < f64::MAX, and t.temperature
-									is ordinarily an f32, meaning that
-									this will never go into infinities.
-								*/
-								let blackbody_radiation: f64 = (emissivity_constant
-									* (f64::from(t.temperature).powi(4)))
-									- radiation_from_space_tick;
-								heat_delta -= blackbody_radiation as f32;
-							}
-							let temp_delta = heat_delta / t.heat_capacity;
-							(is_temp_delta_with_air || temp_delta.abs() > 0.01)
-								.then(|| (i, t.temperature + temp_delta))
-						})
-						.flatten()
-				})
-				.collect::<Vec<_>>();
-			temps_to_update
-				.par_iter()
-				.with_min_len(100)
-				.for_each(|&(i, new_temp)| {
-					let maybe_t = turf_temperatures().try_get_mut(&i).try_unwrap();
-					if maybe_t.is_none() {
-						return;
-					}
-					let t: &mut ThermalInfo = &mut maybe_t.unwrap();
-					t.temperature = with_turf_gases_read(|thin| {
-						thin.get_from_turfid(&i)
+									.unwrap_or(false);
+
+								for (_, loc) in adjacent_tile_ids(adj, i, info.max_x, info.max_y) {
+									heat_delta += turf_temperatures()
+										.try_get(&loc)
+										.try_unwrap()
+										.map_or(0.0, |other| {
+											/*
+												The horrible line below is essentially
+												sharing between solids--making it the minimum of both
+												conductivities makes this consistent, funnily enough.
+											*/
+											t.thermal_conductivity.min(other.thermal_conductivity)
+												* (other.temperature - t.temperature) * (t
+												.heat_capacity
+												* other.heat_capacity
+												/ (t.heat_capacity + other.heat_capacity))
+										});
+								}
+								if t.adjacent_to_space {
+									/*
+										Straight up the standard blackbody radiation
+										equation. All these are f64s because
+										f32::MAX^4 < f64::MAX, and t.temperature
+										is ordinarily an f32, meaning that
+										this will never go into infinities.
+									*/
+									let blackbody_radiation: f64 = (emissivity_constant
+										* (f64::from(t.temperature).powi(4)))
+										- radiation_from_space_tick;
+									heat_delta -= blackbody_radiation as f32;
+								}
+								let temp_delta = heat_delta / t.heat_capacity;
+								(is_temp_delta_with_air || temp_delta.abs() > 0.01)
+									.then(|| (i, t.temperature + temp_delta))
+							})
+							.flatten()
+					})
+					.collect::<Vec<_>>();
+				temps_to_update
+					.par_iter()
+					.with_min_len(100)
+					.for_each(|&(i, new_temp)| {
+						let maybe_t = turf_temperatures().try_get_mut(&i).try_unwrap();
+						if maybe_t.is_none() {
+							return;
+						}
+						let t: &mut ThermalInfo = &mut maybe_t.unwrap();
+						t.temperature = arena
+							.get_from_turfid(&i)
 							.filter(|m| m.enabled())
 							.and_then(|m| {
 								GasArena::with_all_mixtures(|all_mixtures| {
@@ -936,22 +938,22 @@ fn _process_heat_start() -> Result<(), String> {
 									})
 								})
 							})
-							.unwrap_or(new_temp)
+							.unwrap_or(new_temp);
+						if !t.temperature.is_normal() {
+							t.temperature = 2.7;
+						}
+						if t.temperature > MINIMUM_TEMPERATURE_START_SUPERCONDUCTION
+							&& t.temperature > t.heat_capacity
+						{
+							// not what heat capacity means but whatever
+							drop(sender.try_send(Box::new(move || {
+								let turf = unsafe { Value::turf_by_id_unchecked(i) };
+								turf.set(byond_string!("to_be_destroyed"), 1.0)?;
+								Ok(Value::null())
+							})));
+						}
 					});
-					if !t.temperature.is_normal() {
-						t.temperature = 2.7;
-					}
-					if t.temperature > MINIMUM_TEMPERATURE_START_SUPERCONDUCTION
-						&& t.temperature > t.heat_capacity
-					{
-						// not what heat capacity means but whatever
-						drop(sender.try_send(Box::new(move || {
-							let turf = unsafe { Value::turf_by_id_unchecked(i) };
-							turf.set(byond_string!("to_be_destroyed"), 1.0)?;
-							Ok(Value::null())
-						})));
-					}
-				});
+			});
 			//Alright, now how much time did that take?
 			let bench = start_time.elapsed().as_nanos();
 			let old_bench = HEAT_PROCESS_TIME.load(Ordering::Acquire);
