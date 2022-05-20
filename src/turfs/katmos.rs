@@ -432,14 +432,15 @@ fn explosively_depressurize(initial_index: NodeIndex, equalize_hard_turf_limit: 
 					if cur_queue_idx > equalize_hard_turf_limit {
 						continue;
 					}
-					for adj_index in arena.adjacent_node_ids(cur_index) {
-						if let Some(adj_mixture) = arena.get(adj_index) {
-							if turfs.insert(adj_index) {
-								unsafe { Value::turf_by_id_unchecked(cur_mixture.id) }.call(
-									"consider_firelocks",
-									&[&unsafe { Value::turf_by_id_unchecked(adj_mixture.id) }],
-								)?;
-							}
+					for (adj_index, adj_mixture) in arena
+						.adjacent_node_ids(cur_index)
+						.filter_map(|index| Some((index, arena.get(index)?)))
+					{
+						if turfs.insert(adj_index) {
+							unsafe { Value::turf_by_id_unchecked(cur_mixture.id) }.call(
+								"consider_firelocks",
+								&[&unsafe { Value::turf_by_id_unchecked(adj_mixture.id) }],
+							)?;
 						}
 					}
 				}
@@ -454,7 +455,6 @@ fn explosively_depressurize(initial_index: NodeIndex, equalize_hard_turf_limit: 
 	if warned_about_planet_atmos {
 		return Ok(Value::null()); // planet atmos > space
 	}
-
 	if space_turfs.is_empty() {
 		return Ok(Value::null());
 	}
