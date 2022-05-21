@@ -452,7 +452,7 @@ fn fdm(fdm_max_steps: i32, equalize_enabled: bool) -> (Vec<NodeIndex>, Vec<NodeI
 					.raw_nodes()
 					.par_iter()
 					.enumerate()
-					.filter_map(|(index, node)| Some((NodeIndex::from(index as u32), node.weight?)))
+					.filter_map(|(index, node)| Some((NodeIndex::new(index), node.weight?)))
 					.filter(|(index, mixture)| {
 						should_process(*index, mixture, all_mixtures, &arena)
 					})
