@@ -33,7 +33,7 @@ impl Timer {
 	}
 }
 
-type DeferredFunc = Box<dyn FnOnce() -> Result<(), Runtime> + Send + Sync>;
+pub type DeferredFunc = Box<dyn FnOnce() -> Result<(), Runtime> + Send + Sync>;
 
 type CallbackChannel = (flume::Sender<DeferredFunc>, flume::Receiver<DeferredFunc>);
 

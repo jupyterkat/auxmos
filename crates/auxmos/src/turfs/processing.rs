@@ -124,8 +124,7 @@ fn _process_turf_start() -> Result<(), String> {
 			let info = with_processing_callback_receiver(|receiver| receiver.recv().unwrap());
 			let task_lock = TASKS.read();
 			let sender = byond_callback_sender();
-			let mut stats: Vec<Box<dyn Fn() -> Result<(), Runtime> + Send + Sync>> =
-				Default::default();
+			let mut stats: Vec<auxcallback::DeferredFunc> = Default::default();
 			let (low_pressure_turfs, high_pressure_turfs) = {
 				let start_time = Instant::now();
 				let (low_pressure_turfs, high_pressure_turfs) =
@@ -251,7 +250,7 @@ fn _process_turf_start() -> Result<(), String> {
 			}
 			{
 				drop(sender.try_send(Box::new(move || {
-					for callback in stats.iter() {
+					for callback in stats {
 						callback()?;
 					}
 					Ok(())
